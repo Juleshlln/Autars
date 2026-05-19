@@ -1,0 +1,264 @@
+/* ============================================================
+   Autars — Design tokens & base
+   Light theme by default. Dark theme via [data-theme="dark"].
+   ============================================================ */
+
+:root {
+  /* Surface */
+  --bg-app: #FAFAFA;
+  --bg-surface: #FFFFFF;
+  --bg-subtle: #F4F5F7;
+  --bg-inset: #ECEEF2;
+  --bg-overlay: rgba(15, 17, 21, 0.45);
+
+  /* Border */
+  --border-default: #E5E7EB;
+  --border-strong: #D1D5DB;
+  --border-subtle: #EEF0F2;
+  --border-focus: #5B5BD6;
+
+  /* Text */
+  --text-primary: #0F1115;
+  --text-secondary: #4B5563;
+  --text-tertiary: #6B7280;
+  --text-quaternary: #9CA3AF;
+  --text-on-accent: #FFFFFF;
+  --text-link: #5B5BD6;
+
+  /* Accent (indigo) */
+  --accent-50: #EEF0FE;
+  --accent-100: #DDE0FC;
+  --accent-200: #BFC4F8;
+  --accent-500: #6C6CE3;
+  --accent-600: #5B5BD6;
+  --accent-700: #4848B5;
+
+  /* Functional */
+  --success-50: #ECFDF5;
+  --success-200: #A7F3D0;
+  --success-600: #059669;
+  --success-700: #047857;
+
+  --warning-50: #FFFBEB;
+  --warning-200: #FDE68A;
+  --warning-600: #D97706;
+  --warning-700: #B45309;
+
+  --danger-50: #FEF2F2;
+  --danger-200: #FECACA;
+  --danger-600: #DC2626;
+  --danger-700: #B91C1C;
+
+  --info-50: #EFF6FF;
+  --info-200: #BFDBFE;
+  --info-600: #2563EB;
+  --info-700: #1D4ED8;
+
+  /* Rarity (sober) */
+  --rarity-common-bg: #F4F5F7;
+  --rarity-common-fg: #4B5563;
+  --rarity-rare-bg: #EFF6FF;
+  --rarity-rare-fg: #1D4ED8;
+  --rarity-epic-bg: #F3EEFE;
+  --rarity-epic-fg: #5B21B6;
+  --rarity-legendary-bg: #FFFBEB;
+  --rarity-legendary-fg: #B45309;
+
+  /* Radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-full: 999px;
+
+  /* Shadow */
+  --shadow-xs: 0 1px 2px rgba(15, 17, 21, 0.04);
+  --shadow-sm: 0 1px 3px rgba(15, 17, 21, 0.06), 0 1px 2px rgba(15, 17, 21, 0.04);
+  --shadow-md: 0 4px 12px rgba(15, 17, 21, 0.06), 0 2px 4px rgba(15, 17, 21, 0.04);
+  --shadow-lg: 0 12px 32px rgba(15, 17, 21, 0.08), 0 4px 8px rgba(15, 17, 21, 0.04);
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Type */
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 320ms;
+
+  /* Layout */
+  --shell-max: 1400px;
+  --sidebar-width: 232px;
+  --header-height: 56px;
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg-app: #0B0D11;
+  --bg-surface: #14171D;
+  --bg-subtle: #1A1E26;
+  --bg-inset: #20242E;
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+
+  --border-default: #252A35;
+  --border-strong: #323847;
+  --border-subtle: #1E222B;
+  --border-focus: #8A8AFF;
+
+  --text-primary: #F4F5F7;
+  --text-secondary: #B4BAC6;
+  --text-tertiary: #8A91A1;
+  --text-quaternary: #5E6573;
+  --text-on-accent: #FFFFFF;
+  --text-link: #A5A8FF;
+
+  --accent-50: #1B1D30;
+  --accent-100: #232645;
+  --accent-200: #2E3260;
+  --accent-500: #7B7BEC;
+  --accent-600: #8A8AFF;
+  --accent-700: #A5A8FF;
+
+  --success-50: #0E1F1A;
+  --success-200: #134E3E;
+  --success-600: #34D399;
+  --success-700: #6EE7B7;
+
+  --warning-50: #211B0F;
+  --warning-200: #4D3C18;
+  --warning-600: #FBBF24;
+  --warning-700: #FCD34D;
+
+  --danger-50: #221213;
+  --danger-200: #4C1D1F;
+  --danger-600: #F87171;
+  --danger-700: #FCA5A5;
+
+  --info-50: #0F1C2E;
+  --info-200: #1E3A5F;
+  --info-600: #60A5FA;
+  --info-700: #93C5FD;
+
+  --rarity-common-bg: #1A1E26;
+  --rarity-common-fg: #B4BAC6;
+  --rarity-rare-bg: #0F1C2E;
+  --rarity-rare-fg: #93C5FD;
+  --rarity-epic-bg: #1F1730;
+  --rarity-epic-fg: #C4B5FD;
+  --rarity-legendary-bg: #211B0F;
+  --rarity-legendary-fg: #FCD34D;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.3);
+
+  color-scheme: dark;
+}
+
+/* ---------- Reset & base ---------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  background: var(--bg-app);
+}
+
+body {
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv01', 'ss03';
+  transition: background-color var(--duration-base) var(--ease-out),
+    color var(--duration-base) var(--ease-out);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1, h2, h3, h4, h5, h6, p {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--accent-100);
+  color: var(--accent-700);
+}
+
+/* Reduce motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
