@@ -61,6 +61,8 @@ export interface AgentRuntime {
   accessory: string
   /** Pending speech bubble emote ("!", "✓", "?"). */
   emote: string | null
+  /** Pending mission template ids queued behind the active mission. */
+  taskQueue: string[]
 }
 
 export interface AgentPalette {
@@ -83,15 +85,26 @@ export interface MissionRuntime {
   templateId: string
   /** Mission duration in ms. */
   durationMs: number
-  /** Energy cost. */
-  energyCost: number
-  /** Income earned on completion. */
+  /** SaaS credit cost charged against the monthly plan. */
+  creditCost: number
+  /** Real revenue (€) generated on completion. */
   reward: number
   /** Started at timestamp (performance.now). */
   startedAt: number
   /** Cached progress (0..1). */
   progress: number
   done: boolean
+}
+
+export type SubscriptionPlan = 'Starter' | 'Pro' | 'Empire'
+
+export interface OfflineReport {
+  agentId: string
+  agentName: string
+  tasksCompleted: number
+  creditsSpent: number
+  revenueGenerated: number
+  deliverableTitles: string[]
 }
 
 export interface ActivityLog {
@@ -150,10 +163,14 @@ export interface GameState {
 
   /* Resources */
   xp: number
-  energy: number
-  energyMax: number
   credits: number
   reputation: number
+
+  /* SaaS economy */
+  subscriptionPlan: SubscriptionPlan
+  monthlyCredits: number
+  creditsUsedThisMonth: number
+  realRevenue: number
 
   /* HQ */
   hqLevel: number
@@ -178,6 +195,8 @@ export interface GameState {
   banner: { tone: 'info' | 'success' | 'warning'; message: string } | null
   drawerAgentId: string | null
   openDeliverableId: string | null
+  showOfflineReport: boolean
+  offlineReport: OfflineReport | null
 
   /* Actions */
   selectAgent: (id: string | null) => void
@@ -186,6 +205,7 @@ export interface GameState {
   setAgentState: (id: string, state: AgentLifeState) => void
   setAgentEmote: (id: string, emote: string | null) => void
   startMission: (agentId: string, missionTemplateId: keyof typeof MISSION_TEMPLATES) => void
+  enqueueMission: (agentId: string, missionTemplateId: keyof typeof MISSION_TEMPLATES) => void
   completeMission: (agentId: string) => void
   unlockAgent: (id: string) => void
   upgradeHQ: () => void
@@ -194,6 +214,8 @@ export interface GameState {
   pushLog: (agentId: string, message: string) => void
   openAgentDrawer: (id: string | null) => void
   openDeliverable: (id: string | null) => void
+  closeOfflineReport: () => void
+  collectOfflineReport: () => void
 }
 
 /* ============================================================
@@ -270,7 +292,7 @@ const WORKSPACES: Workspace[] = [
    ============================================================ */
 
 function makeAgents(): Record<string, AgentRuntime> {
-  const seed: AgentRuntime[] = [
+  const seed: Array<Omit<AgentRuntime, 'taskQueue'>> = [
     {
       id: 'strategist',
       name: 'Stratège',
@@ -370,7 +392,7 @@ function makeAgents(): Record<string, AgentRuntime> {
       emote: null,
     },
   ]
-  return Object.fromEntries(seed.map((a) => [a.id, a]))
+  return Object.fromEntries(seed.map((a) => [a.id, { ...a, taskQueue: [] }]))
 }
 
 /* ============================================================
@@ -389,7 +411,7 @@ interface MissionTemplate {
   title: string
   output: string
   durationMs: number
-  energyCost: number
+  creditCost: number
   reward: number
   workspaceFor: (agentId: string) => string
   /** Script of log lines streamed while the agent works (text only — no timestamp). */
@@ -409,7 +431,7 @@ export const MISSION_TEMPLATES: Record<string, MissionTemplate> = {
     title: "Scan d'opportunité",
     output: "Rapport d'opportunité",
     durationMs: 14000,
-    energyCost: 8,
+    creditCost: 8,
     reward: 80,
     workspaceFor: (agentId: string): string => (agentId === 'analyst' ? 'whiteboard' : 'computer-1'),
     activityScript: [
@@ -459,7 +481,7 @@ Construire un brief de positionnement focalisé sur le segment 1.`,
     title: 'Positionnement',
     output: 'Brief de positionnement',
     durationMs: 18000,
-    energyCost: 10,
+    creditCost: 10,
     reward: 120,
     workspaceFor: (agentId: string): string =>
       agentId === 'strategist' ? 'whiteboard' : 'brainstorm',
@@ -514,7 +536,7 @@ Nous ne sommes pas un outil d'audit générique. Nous sommes la **plateforme d'A
     title: 'Mission Marketing',
     output: 'Plan de communication',
     durationMs: 16000,
-    energyCost: 9,
+    creditCost: 9,
     reward: 100,
     workspaceFor: () => 'brainstorm',
     activityScript: [
@@ -563,7 +585,7 @@ _Généré par ${agentName} · ${new Date().toLocaleDateString('fr-FR')}_
     title: 'Kit de marque',
     output: 'Nom, accroche & ton',
     durationMs: 22000,
-    energyCost: 11,
+    creditCost: 11,
     reward: 180,
     workspaceFor: () => 'computer-2',
     activityScript: [
@@ -681,10 +703,13 @@ export const useGame = create<GameState>((set, get) => ({
   stage: 'Opportunité validée',
 
   xp: 120,
-  energy: 92,
-  energyMax: 100,
   credits: 180,
   reputation: 38,
+
+  subscriptionPlan: 'Pro',
+  monthlyCredits: 10000,
+  creditsUsedThisMonth: 1450,
+  realRevenue: 240,
 
   hqLevel: 2,
 
@@ -702,7 +727,7 @@ export const useGame = create<GameState>((set, get) => ({
       templateId: 'scan',
       // 52% complete already; the rest plays out live.
       durationMs: 30000,
-      energyCost: 0,
+      creditCost: 0,
       reward: 140,
       startedAt: performance.now() - 30000 * 0.52,
       progress: 0.52,
@@ -769,6 +794,19 @@ Lancer la mission de positionnement.`,
   banner: null,
   drawerAgentId: null,
   openDeliverableId: null,
+  showOfflineReport: true,
+  offlineReport: {
+    agentId: 'analyst',
+    agentName: 'Analyste Marché',
+    tasksCompleted: 3,
+    creditsSpent: 150,
+    revenueGenerated: 320,
+    deliverableTitles: [
+      "Scan d'opportunité — segment SaaS B2B",
+      'Brief de positionnement — Lumen.audit',
+      "Plan d'attaque LinkedIn outbound",
+    ],
+  },
 
   selectAgent: (id) => set({ selectedAgentId: id }),
 
@@ -791,9 +829,49 @@ Lancer la mission de positionnement.`,
     }),
 
   startMission: (agentId, templateId) => {
+    get().enqueueMission(agentId, templateId)
+  },
+
+  enqueueMission: (agentId, templateId) => {
+    const state = get()
+    const agent = state.agents[agentId]
+    if (!agent || agent.state === 'locked') return
+    const template = MISSION_TEMPLATES[templateId]
+    if (!template) return
+
+    if (state.creditsUsedThisMonth + template.creditCost > state.monthlyCredits) {
+      set({
+        banner: {
+          tone: 'warning',
+          message: 'Crédits SaaS épuisés. Upgradez votre plan.',
+        },
+      })
+      return
+    }
+
+    const busy =
+      agent.state === 'working' ||
+      agent.state === 'walking' ||
+      agent.state === 'delivered' ||
+      agent.state === 'celebrating'
+
+    if (busy) {
+      set({
+        agents: {
+          ...state.agents,
+          [agentId]: { ...agent, taskQueue: [...agent.taskQueue, templateId as string] },
+        },
+        banner: {
+          tone: 'info',
+          message: `Mission ajoutée à la file de ${agent.name} (${agent.taskQueue.length + 1} en attente)`,
+        },
+      })
+      return
+    }
+
     void executeAgentMission(agentId, templateId, {
-      ventureName: get().ventureName,
-      ventureSubtitle: get().ventureSubtitle,
+      ventureName: state.ventureName,
+      ventureSubtitle: state.ventureSubtitle,
     })
   },
 
@@ -860,18 +938,34 @@ Lancer la mission de positionnement.`,
         },
       },
       missions: nextMissions,
-      credits: state.credits + reward,
+      realRevenue: state.realRevenue + reward,
       xp: state.xp + Math.round(reward / 4),
       reputation: Math.min(100, state.reputation + 4),
-      banner: { tone: 'success', message: `Livrable approuvé · +${reward} crédits` },
+      banner: { tone: 'success', message: `Livrable vendu · +${reward}€` },
       openDeliverableId: deliverableId,
     })
-    useGame.getState().pushLog(agentId, `Livrable validé — +${reward} crédits`)
-    // Return to idle after a short celebration so the agent becomes available again.
+    useGame.getState().pushLog(agentId, `Livrable validé — +${reward}€ revenus réels`)
+    // Return to idle (or auto-chain the next queued mission) after a short celebration.
     setTimeout(() => {
       const s2 = get()
       const a2 = s2.agents[agentId]
       if (!a2 || a2.state !== 'celebrating') return
+
+      if (a2.taskQueue.length > 0) {
+        const [nextTemplateId, ...rest] = a2.taskQueue
+        set({
+          agents: {
+            ...s2.agents,
+            [agentId]: { ...a2, state: 'idle', emote: null, taskQueue: rest },
+          },
+        })
+        void executeAgentMission(agentId, nextTemplateId as keyof typeof MISSION_TEMPLATES, {
+          ventureName: s2.ventureName,
+          ventureSubtitle: s2.ventureSubtitle,
+        })
+        return
+      }
+
       set({
         agents: {
           ...s2.agents,
@@ -926,8 +1020,7 @@ Lancer la mission de positionnement.`,
       return {
         credits: s.credits - cost,
         hqLevel: s.hqLevel + 1,
-        energyMax: s.energyMax + 20,
-        energy: Math.min(s.energyMax + 20, s.energy + 30),
+        monthlyCredits: s.monthlyCredits + 2500,
         banner: { tone: 'success', message: `QG amélioré (Niv. ${s.hqLevel + 1})` },
       }
     }),
@@ -953,6 +1046,28 @@ Lancer la mission de positionnement.`,
 
   openAgentDrawer: (id) => set({ drawerAgentId: id }),
   openDeliverable: (id) => set({ openDeliverableId: id }),
+
+  closeOfflineReport: () => set({ showOfflineReport: false }),
+  collectOfflineReport: () => {
+    const s = get()
+    const report = s.offlineReport
+    if (!report) {
+      set({ showOfflineReport: false })
+      return
+    }
+    set({
+      realRevenue: s.realRevenue + report.revenueGenerated,
+      creditsUsedThisMonth: Math.min(
+        s.monthlyCredits,
+        s.creditsUsedThisMonth + report.creditsSpent,
+      ),
+      showOfflineReport: false,
+      banner: {
+        tone: 'success',
+        message: `Livrables récoltés · +${report.revenueGenerated}€`,
+      },
+    })
+  },
 }))
 
 /* ============================================================
@@ -974,11 +1089,11 @@ export function executeAgentMission(
   if (!agent || agent.state === 'locked') return
   const template = MISSION_TEMPLATES[templateId]
   if (!template) return
-  if (store.energy < template.energyCost) {
+  if (store.creditsUsedThisMonth + template.creditCost > store.monthlyCredits) {
     useGame.setState({
       banner: {
         tone: 'warning',
-        message: `Énergie insuffisante (${template.energyCost} requis)`,
+        message: 'Crédits SaaS épuisés. Upgradez votre plan.',
       },
     })
     return
@@ -989,7 +1104,7 @@ export function executeAgentMission(
   const startedAt = performance.now() + 1200
 
   useGame.setState({
-    energy: Math.max(0, store.energy - template.energyCost),
+    creditsUsedThisMonth: store.creditsUsedThisMonth + template.creditCost,
     agents: {
       ...store.agents,
       [agentId]: {
@@ -1009,7 +1124,7 @@ export function executeAgentMission(
         output: template.output,
         templateId,
         durationMs: template.durationMs,
-        energyCost: template.energyCost,
+        creditCost: template.creditCost,
         reward: template.reward,
         startedAt,
         progress: 0,

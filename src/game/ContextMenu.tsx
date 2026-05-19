@@ -5,7 +5,7 @@ export function ContextMenu() {
   const menu = useGame((s) => s.contextMenu)
   const agents = useGame((s) => s.agents)
   const close = useGame((s) => s.closeContextMenu)
-  const startMission = useGame((s) => s.startMission)
+  const enqueueMission = useGame((s) => s.enqueueMission)
   const selectAgent = useGame((s) => s.selectAgent)
   const completeMission = useGame((s) => s.completeMission)
   const unlockAgent = useGame((s) => s.unlockAgent)
@@ -55,43 +55,38 @@ export function ContextMenu() {
       tone: 'success',
       hint: 'Crédits + XP',
     })
-  } else if (agent.state === 'working' || agent.state === 'walking') {
-    items.push({
-      label: 'Mission en cours…',
-      onClick: () => {},
-      disabled: true,
-      hint: `${Math.round(agent.progress * 100)}%`,
-    })
   } else {
+    const verb =
+      agent.state === 'working' || agent.state === 'walking' ? 'Empiler' : 'Lancer'
     if (agent.id === 'analyst') {
       items.push({
-        label: "Lancer · Scan d'opportunité",
-        onClick: () => startMission(agent.id, 'scan'),
+        label: `${verb} · Scan d'opportunité`,
+        onClick: () => enqueueMission(agent.id, 'scan'),
         tone: 'primary',
-        hint: `-${MISSION_TEMPLATES.scan.energyCost} ⚡ · +${MISSION_TEMPLATES.scan.reward}c`,
+        hint: `-${MISSION_TEMPLATES.scan.creditCost} crédits · +${MISSION_TEMPLATES.scan.reward}€`,
       })
     }
     if (agent.id === 'strategist') {
       items.push({
-        label: 'Lancer · Positionnement',
-        onClick: () => startMission(agent.id, 'positioning'),
+        label: `${verb} · Positionnement`,
+        onClick: () => enqueueMission(agent.id, 'positioning'),
         tone: 'primary',
-        hint: `-${MISSION_TEMPLATES.positioning.energyCost} ⚡ · +${MISSION_TEMPLATES.positioning.reward}c`,
+        hint: `-${MISSION_TEMPLATES.positioning.creditCost} crédits · +${MISSION_TEMPLATES.positioning.reward}€`,
       })
     }
     if (agent.id === 'brandBuilder') {
       items.push({
-        label: 'Lancer · Kit de marque',
-        onClick: () => startMission(agent.id, 'branding'),
+        label: `${verb} · Kit de marque`,
+        onClick: () => enqueueMission(agent.id, 'branding'),
         tone: 'primary',
-        hint: `-${MISSION_TEMPLATES.branding.energyCost} ⚡ · +${MISSION_TEMPLATES.branding.reward}c`,
+        hint: `-${MISSION_TEMPLATES.branding.creditCost} crédits · +${MISSION_TEMPLATES.branding.reward}€`,
       })
     }
     items.push({
-      label: 'Lancer · Mission Marketing',
-      onClick: () => startMission(agent.id, 'marketing'),
+      label: `${verb} · Mission Marketing`,
+      onClick: () => enqueueMission(agent.id, 'marketing'),
       tone: 'primary',
-      hint: `-${MISSION_TEMPLATES.marketing.energyCost} ⚡ · +${MISSION_TEMPLATES.marketing.reward}c`,
+      hint: `-${MISSION_TEMPLATES.marketing.creditCost} crédits · +${MISSION_TEMPLATES.marketing.reward}€`,
     })
   }
 
@@ -114,6 +109,13 @@ export function ContextMenu() {
         <div>
           <strong>{agent.name}</strong>
           <span>{agent.className}</span>
+          {agent.state !== 'locked' && (
+            <span className="ctx-queue">
+              {agent.taskQueue.length === 0
+                ? 'File vide'
+                : `${agent.taskQueue.length} tâche${agent.taskQueue.length > 1 ? 's' : ''} en attente`}
+            </span>
+          )}
         </div>
       </header>
       <ul className="ctx-list">

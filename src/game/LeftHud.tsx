@@ -1,6 +1,12 @@
 import { useShallow } from 'zustand/react/shallow'
 import { useGame, selectAgentsArray } from './store'
 
+const EURO = new Intl.NumberFormat('fr-FR', {
+  style: 'currency',
+  currency: 'EUR',
+  maximumFractionDigits: 0,
+})
+
 export function LeftHud() {
   const venture = useGame((s) => s.ventureName)
   const subtitle = useGame((s) => s.ventureSubtitle)
@@ -8,8 +14,10 @@ export function LeftHud() {
   const levelLabel = useGame((s) => s.levelLabel)
   const stage = useGame((s) => s.stage)
   const xp = useGame((s) => s.xp)
-  const energy = useGame((s) => s.energy)
-  const energyMax = useGame((s) => s.energyMax)
+  const subscriptionPlan = useGame((s) => s.subscriptionPlan)
+  const monthlyCredits = useGame((s) => s.monthlyCredits)
+  const creditsUsedThisMonth = useGame((s) => s.creditsUsedThisMonth)
+  const realRevenue = useGame((s) => s.realRevenue)
   const credits = useGame((s) => s.credits)
   const reputation = useGame((s) => s.reputation)
   const agents = useGame(useShallow(selectAgentsArray))
@@ -21,6 +29,7 @@ export function LeftHud() {
   const working = agents.filter((a) => a.state === 'working' || a.state === 'walking')
   const delivered = agents.filter((a) => a.state === 'delivered')
   const upgradeCost = 200 + hqLevel * 150
+  const creditsRemaining = Math.max(0, monthlyCredits - creditsUsedThisMonth)
 
   return (
     <aside className="hud hud-left" aria-label="État du projet">
@@ -46,13 +55,24 @@ export function LeftHud() {
         </div>
       </section>
 
+      <section className="hud-card hud-card-revenue">
+        <div className="hud-revenue-head">
+          <span className="hud-eyebrow">ROI · Revenus générés</span>
+          <span className="hud-revenue-badge">Live</span>
+        </div>
+        <strong className="hud-revenue-value">{EURO.format(realRevenue)}</strong>
+        <p className="hud-muted hud-muted-sm">Vente automatisée des livrables agents.</p>
+      </section>
+
       <section className="hud-card">
         <Gauge
-          label="Énergie"
-          icon="⚡"
-          value={energy}
-          max={energyMax}
-          fill="linear-gradient(90deg,#34d399,#22d3ee)"
+          label={`Crédits du Plan ${subscriptionPlan}`}
+          icon="◆"
+          value={creditsUsedThisMonth}
+          max={monthlyCredits}
+          fill="linear-gradient(90deg,#7b7bec,#22d3ee)"
+          unit=" crédits"
+          footnote={`${creditsRemaining.toLocaleString('fr-FR')} crédits restants ce mois`}
         />
         <Gauge
           label="XP"
@@ -69,7 +89,7 @@ export function LeftHud() {
           fill="linear-gradient(90deg,#fbbf24,#f97316)"
         />
         <div className="hud-credits">
-          <span>Crédits</span>
+          <span>Cash trésorerie</span>
           <strong className="hud-mono">{credits}c</strong>
         </div>
       </section>
@@ -98,7 +118,10 @@ export function LeftHud() {
             <span className="hud-alert-dot hud-alert-dot-blink" style={{ background: a.themeColor }} />
             <div>
               <strong>{a.name}</strong>
-              <span>En mission · {Math.round(a.progress * 100)}%</span>
+              <span>
+                En mission · {Math.round(a.progress * 100)}%
+                {a.taskQueue.length > 0 && ` · ${a.taskQueue.length} en file`}
+              </span>
             </div>
           </div>
         ))}
@@ -131,6 +154,11 @@ export function LeftHud() {
                 {(a.state === 'working' || a.state === 'walking') && (
                   <span className="hud-roster-progress">{Math.round(a.progress * 100)}%</span>
                 )}
+                {a.state !== 'locked' && a.taskQueue.length > 0 && (
+                  <span className="hud-roster-badge" title={`${a.taskQueue.length} en attente`}>
+                    +{a.taskQueue.length}
+                  </span>
+                )}
                 {a.state === 'delivered' && <span className="hud-roster-badge">!</span>}
               </button>
             </li>
@@ -141,7 +169,7 @@ export function LeftHud() {
       <section className="hud-card hud-card-hq">
         <div className="hud-section-title">QG · Niv {hqLevel}</div>
         <p className="hud-muted hud-muted-sm">
-          Agrandir débloque de nouveaux postes et augmente l'énergie max.
+          Agrandir débloque de nouveaux postes et augmente les crédits inclus dans le plan.
         </p>
         <button
           type="button"
@@ -163,12 +191,16 @@ function Gauge({
   value,
   max,
   fill,
+  unit,
+  footnote,
 }: {
   label: string
   icon: string
   value: number
   max: number
   fill: string
+  unit?: string
+  footnote?: string
 }) {
   const pct = Math.max(0, Math.min(100, (value / max) * 100))
   return (
@@ -177,7 +209,8 @@ function Gauge({
         <span aria-hidden>{icon}</span>
         <strong>{label}</strong>
         <em className="hud-mono">
-          {value}/{max}
+          {value.toLocaleString('fr-FR')}/{max.toLocaleString('fr-FR')}
+          {unit ?? ''}
         </em>
       </div>
       <div className="hud-gauge-track">
@@ -188,6 +221,7 @@ function Gauge({
           ))}
         </div>
       </div>
+      {footnote && <p className="hud-gauge-footnote">{footnote}</p>}
     </div>
   )
 }

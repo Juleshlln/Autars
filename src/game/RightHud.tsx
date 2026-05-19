@@ -5,7 +5,7 @@ export function RightHud() {
   const selectedId = useGame((s) => s.selectedAgentId)
   const agents = useGame((s) => s.agents)
   const credits = useGame((s) => s.credits)
-  const startMission = useGame((s) => s.startMission)
+  const enqueueMission = useGame((s) => s.enqueueMission)
   const completeMission = useGame((s) => s.completeMission)
   const unlockAgent = useGame((s) => s.unlockAgent)
   const openAgentDrawer = useGame((s) => s.openAgentDrawer)
@@ -67,6 +67,17 @@ export function RightHud() {
               </div>
             )}
 
+            {agent.state !== 'locked' && (
+              <div className="hud-queue">
+                <span className="hud-queue-label">File de tâches</span>
+                <strong className="hud-queue-count">
+                  {agent.taskQueue.length === 0
+                    ? 'Vide'
+                    : `${agent.taskQueue.length} tâche${agent.taskQueue.length > 1 ? 's' : ''} en attente`}
+                </strong>
+              </div>
+            )}
+
             <div className="hud-actions">
               {agent.state === 'locked' ? (
                 <button
@@ -85,20 +96,25 @@ export function RightHud() {
                   onClick={() => completeMission(agent.id)}
                 >
                   <span>Valider le livrable</span>
-                  <em>+ crédits</em>
+                  <em>+ revenus €</em>
                 </button>
               ) : agent.state === 'working' || agent.state === 'walking' ? (
-                <button type="button" className="hud-action" disabled>
-                  Mission en cours
+                <button
+                  type="button"
+                  className="hud-action hud-action-primary"
+                  onClick={() => enqueueMission(agent.id, defaultMissionFor(agent.id))}
+                >
+                  <span>Empiler une mission</span>
+                  <em>-{missionCostFor(agent.id)} crédits</em>
                 </button>
               ) : (
                 <button
                   type="button"
                   className="hud-action hud-action-primary"
-                  onClick={() => startMission(agent.id, defaultMissionFor(agent.id))}
+                  onClick={() => enqueueMission(agent.id, defaultMissionFor(agent.id))}
                 >
                   <span>Lancer une mission</span>
-                  <em>-{missionCostFor(agent.id)}⚡</em>
+                  <em>-{missionCostFor(agent.id)} crédits</em>
                 </button>
               )}
 
@@ -160,7 +176,7 @@ function defaultMissionFor(agentId: string): keyof typeof MISSION_TEMPLATES {
 }
 
 function missionCostFor(agentId: string) {
-  return MISSION_TEMPLATES[defaultMissionFor(agentId)].energyCost
+  return MISSION_TEMPLATES[defaultMissionFor(agentId)].creditCost
 }
 
 function accessoryLabel(s: string) {

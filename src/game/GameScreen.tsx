@@ -7,6 +7,7 @@ import { ContextMenu } from './ContextMenu'
 import { ActivityConsole } from './ActivityConsole'
 import { AgentDrawer } from './AgentDrawer'
 import { DeliverableModal } from './DeliverableModal'
+import { OfflineReportModal } from './OfflineReportModal'
 import { useGame } from './store'
 
 import './game.css'
@@ -96,6 +97,7 @@ export function GameScreen({ onBackToHub }: Props) {
       <ContextMenu />
       <AgentDrawer />
       <DeliverableModal />
+      <OfflineReportModal />
 
       <AnimatePresence>
         {banner && (

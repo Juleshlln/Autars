@@ -10,4 +10,6 @@ export type {
   Venture,
   ActivityLog,
   MissionDeliverable,
+  SubscriptionPlan,
+  OfflineReport,
 } from './store'
