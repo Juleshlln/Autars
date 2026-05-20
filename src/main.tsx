@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import { AppRoot } from './game/AppRoot'
+import AutarsApp from './v1/AutarsApp'
 
-createRoot(document.getElementById('root')!).render(<AppRoot />)
+createRoot(document.getElementById('root')!).render(<AutarsApp />)

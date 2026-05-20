@@ -1,4 +1,12 @@
 import { create } from 'zustand'
+import {
+  streamBriefTurn,
+  streamMission,
+  type BriefMessage,
+  type MissionKey,
+  type VentureContext,
+} from './llm'
+import { MISSION_META } from './missions'
 
 /* ============================================================
    Types
@@ -61,8 +69,13 @@ export interface AgentRuntime {
   accessory: string
   /** Pending speech bubble emote ("!", "✓", "?"). */
   emote: string | null
-  /** Pending mission template ids queued behind the active mission. */
-  taskQueue: string[]
+  /** Pending mission entries queued behind the active mission. */
+  taskQueue: QueuedTask[]
+}
+
+export interface QueuedTask {
+  templateId: string
+  contextDeliverableId?: string | null
 }
 
 export interface AgentPalette {
@@ -87,13 +100,15 @@ export interface MissionRuntime {
   durationMs: number
   /** SaaS credit cost charged against the monthly plan. */
   creditCost: number
-  /** Real revenue (€) generated on completion. */
+  /** Commercial value used later by the marketplace sale engine. */
   reward: number
   /** Started at timestamp (performance.now). */
   startedAt: number
   /** Cached progress (0..1). */
   progress: number
   done: boolean
+  /** Optional id of a prior deliverable used as context for this mission. */
+  contextDeliverableId?: string | null
 }
 
 export type SubscriptionPlan = 'Starter' | 'Pro' | 'Empire'
@@ -125,6 +140,25 @@ export interface MissionDeliverable {
   markdown: string
   /** Structured JSON payload. */
   json: Record<string, unknown>
+  /** Id of the deliverable used as context for the mission that produced this one. */
+  parentDeliverableId?: string | null
+}
+
+export interface ActiveProduct {
+  id: string
+  ventureId: string
+  deliverableId: string | null
+  agentId: string
+  agentName: string
+  title: string
+  /** Sale price (already includes any synergy bonus). */
+  price: number
+  /** Base reward before synergy bonus — used for display. */
+  basePrice: number
+  /** True when the producing deliverable was built with a parent context. */
+  synergyBonus: boolean
+  createdAt: number
+  status: 'active'
 }
 
 export interface Venture {
@@ -171,6 +205,14 @@ export interface GameState {
   monthlyCredits: number
   creditsUsedThisMonth: number
   realRevenue: number
+  activeProducts: ActiveProduct[]
+  passiveSaleLastCheckedAt: number
+  /** Last passive sale timestamp (performance.now) — read by the canvas to fire the shockwave VFX. */
+  lastSaleAt: number
+  /** Amount of the last passive sale — used by the canvas popup. */
+  lastSaleAmount: number
+  /** Last time a system/infra log was emitted (performance.now). */
+  systemLogLastAt: number
 
   /* HQ */
   hqLevel: number
@@ -197,6 +239,27 @@ export interface GameState {
   openDeliverableId: string | null
   showOfflineReport: boolean
   offlineReport: OfflineReport | null
+  showNewVentureModal: boolean
+
+  /* Real AI brief chat */
+  briefChat: {
+    missionKey: MissionKey
+    agentId: string
+    ventureId: string
+    messages: BriefMessage[]
+    status: 'briefing' | 'streaming' | 'ready' | 'running' | 'error'
+    error?: string
+    contextDeliverableId?: string | null
+  } | null
+
+  /* Briefing modal — lets player attach a prior deliverable as context */
+  briefingModal: {
+    agentId: string
+    mode: 'live' | 'enqueue'
+    missionKey?: MissionKey
+    missionTemplateId?: string
+    title: string
+  } | null
 
   /* Actions */
   selectAgent: (id: string | null) => void
@@ -204,18 +267,51 @@ export interface GameState {
   closeContextMenu: () => void
   setAgentState: (id: string, state: AgentLifeState) => void
   setAgentEmote: (id: string, emote: string | null) => void
-  startMission: (agentId: string, missionTemplateId: keyof typeof MISSION_TEMPLATES) => void
-  enqueueMission: (agentId: string, missionTemplateId: keyof typeof MISSION_TEMPLATES) => void
+  startMission: (
+    agentId: string,
+    missionTemplateId: keyof typeof MISSION_TEMPLATES,
+    contextDeliverableId?: string | null,
+  ) => void
+  enqueueMission: (
+    agentId: string,
+    missionTemplateId: keyof typeof MISSION_TEMPLATES,
+    contextDeliverableId?: string | null,
+  ) => void
   completeMission: (agentId: string) => void
   unlockAgent: (id: string) => void
   upgradeHQ: () => void
   tickMissions: (now: number) => void
   setBanner: (banner: { tone: 'info' | 'success' | 'warning'; message: string } | null) => void
   pushLog: (agentId: string, message: string) => void
+  pushSystemLog: (channel: 'SYSTEM' | 'ROUTER' | 'DATABASE', message: string) => void
   openAgentDrawer: (id: string | null) => void
   openDeliverable: (id: string | null) => void
   closeOfflineReport: () => void
   collectOfflineReport: () => void
+  openNewVentureModal: () => void
+  closeNewVentureModal: () => void
+  createVenture: (data: {
+    industry: string
+    name: string
+    subtitle: string
+    starterAgentId: string
+  }) => string
+  setActiveVenture: (id: string) => void
+
+  /* Real AI brief chat actions */
+  openBriefChat: (missionKey: MissionKey, contextDeliverableId?: string | null) => void
+  closeBriefChat: () => void
+  sendBriefUserMessage: (text: string) => Promise<void>
+  runRealMission: () => Promise<void>
+
+  /* Briefing modal actions */
+  openBriefingModal: (
+    payload:
+      | { agentId: string; mode: 'live'; missionKey: MissionKey; title: string }
+      | { agentId: string; mode: 'enqueue'; missionTemplateId: string; title: string },
+  ) => void
+  closeBriefingModal: () => void
+  confirmBriefingModal: (contextDeliverableId: string | null) => void
 }
 
 /* ============================================================
@@ -299,13 +395,13 @@ function makeAgents(): Record<string, AgentRuntime> {
       className: 'Architecte de la vision',
       palette: PALETTES.strategist!,
       themeColor: '#FFCF3A',
-      level: 3,
-      reliability: 84,
-      impactLabel: '+15% impact',
+      level: 1,
+      reliability: 70,
+      impactLabel: 'Nouvelle recrue',
       description: 'Cartographie le marché et la promesse centrale du projet.',
-      progress: 0.52,
-      state: 'working',
-      workspaceId: 'computer-1',
+      progress: 0,
+      state: 'idle',
+      workspaceId: 'desk-strategist',
       homeWorkspaceId: 'desk-strategist',
       spriteSeed: 1,
       order: 0,
@@ -318,18 +414,19 @@ function makeAgents(): Record<string, AgentRuntime> {
       className: 'Œil quantitatif',
       palette: PALETTES.analyst!,
       themeColor: '#22D3EE',
-      level: 2,
-      reliability: 78,
-      impactLabel: '+9% maturité',
+      level: 1,
+      reliability: 0,
+      impactLabel: 'Recrutement bloqué',
       description: 'Croise données marché et signaux pour valider les hypothèses.',
-      progress: 1,
-      state: 'delivered',
-      workspaceId: 'whiteboard',
+      progress: 0,
+      state: 'locked',
+      workspaceId: null,
       homeWorkspaceId: 'desk-analyst',
+      unlockCost: 150,
       spriteSeed: 2,
       order: 1,
       accessory: 'cheveux turquoise',
-      emote: '!',
+      emote: null,
     },
     {
       id: 'brandBuilder',
@@ -646,12 +743,12 @@ const VENTURES_SEED: Venture[] = [
     name: 'Audit Visibilité',
     subtitle: "Service d'audit IA pour SaaS B2B",
     industry: 'AI Ops',
-    level: 2,
-    levelLabel: 'Micro-entreprise IA',
-    stage: 'Opportunité validée',
+    level: 1,
+    levelLabel: 'Solo Builder',
+    stage: 'Idée validée',
     status: 'active',
-    monthlyRevenue: 1840,
-    agentCount: 2,
+    monthlyRevenue: 0,
+    agentCount: 1,
     tagline: 'Auditez votre stack AI en 48h.',
     launchedLabel: 'Lancée mars 2026',
     themeColor: '#7B7BEC',
@@ -676,12 +773,12 @@ const VENTURES_SEED: Venture[] = [
     name: 'Curated AI Weekly',
     subtitle: 'Newsletter B2B autonome pilotée par 4 agents',
     industry: 'Media',
-    level: 3,
-    levelLabel: 'Équipe automatisée',
-    stage: 'Acquisition active',
-    status: 'active',
-    monthlyRevenue: 6420,
-    agentCount: 4,
+    level: 1,
+    levelLabel: 'Solo Builder',
+    stage: 'Idée validée',
+    status: 'incubating',
+    monthlyRevenue: 0,
+    agentCount: 0,
     tagline: 'L\'IA décryptée chaque vendredi, sans bullshit.',
     launchedLabel: 'Lancée janvier 2026',
     themeColor: '#22D3EE',
@@ -698,115 +795,45 @@ export const useGame = create<GameState>((set, get) => ({
 
   ventureName: 'Audit Visibilité',
   ventureSubtitle: "Service d'audit IA pour SaaS B2B",
-  level: 2,
-  levelLabel: 'Micro-entreprise IA',
-  stage: 'Opportunité validée',
+  level: 1,
+  levelLabel: 'Solo Builder',
+  stage: 'Idée validée',
 
-  xp: 120,
-  credits: 180,
-  reputation: 38,
+  xp: 0,
+  credits: 300,
+  reputation: 0,
 
   subscriptionPlan: 'Pro',
   monthlyCredits: 10000,
-  creditsUsedThisMonth: 1450,
-  realRevenue: 240,
+  creditsUsedThisMonth: 0,
+  realRevenue: 0,
+  activeProducts: [],
+  passiveSaleLastCheckedAt: performance.now(),
+  lastSaleAt: 0,
+  lastSaleAmount: 0,
+  systemLogLastAt: performance.now(),
 
-  hqLevel: 2,
+  hqLevel: 1,
 
   agents: makeAgents(),
   agentOrder: ['strategist', 'analyst', 'brandBuilder', 'offerArchitect', 'growthOperator'],
   workspaces: Object.fromEntries(WORKSPACES.map((w) => [w.id, w])),
 
-  /* Seed an in-flight mission for the strategist so the simulation feels alive. */
-  missions: {
-    strategist: {
-      id: 'seed-strategist',
-      agentId: 'strategist',
-      title: "Scan d'opportunité",
-      output: "Rapport d'opportunité",
-      templateId: 'scan',
-      // 52% complete already; the rest plays out live.
-      durationMs: 30000,
-      creditCost: 0,
-      reward: 140,
-      startedAt: performance.now() - 30000 * 0.52,
-      progress: 0.52,
-      done: false,
-    },
-  },
+  missions: {},
+  logs: [],
+  deliverables: {},
+  latestDeliverableByAgent: {},
 
-  logs: [
-    {
-      id: 'log-seed-1',
-      ts: Date.now() - 6000,
-      agentId: 'strategist',
-      agentName: 'Stratège',
-      message: 'Cartographie du paysage concurrentiel via SimilarWeb…',
-    },
-    {
-      id: 'log-seed-2',
-      ts: Date.now() - 4000,
-      agentId: 'strategist',
-      agentName: 'Stratège',
-      message: 'Analyse comparée : snyk.io, mintlify.com, vanta.com…',
-    },
-    {
-      id: 'log-seed-3',
-      ts: Date.now() - 2000,
-      agentId: 'analyst',
-      agentName: 'Analyste Marché',
-      message: 'Livrable structuré et archivé.',
-    },
-  ],
-  deliverables: {
-    'deliverable-seed-analyst': {
-      id: 'deliverable-seed-analyst',
-      agentId: 'analyst',
-      agentName: 'Analyste Marché',
-      missionTitle: "Scan d'opportunité",
-      generatedAt: Date.now() - 1000,
-      markdown: `# Rapport d'opportunité — Audit Visibilité
-_Généré par Analyste Marché_
-
-## TL;DR
-Service d'audit IA pour SaaS B2B adresse un pain non résolu : la lenteur d'intégration des outils d'audit AI dans les stacks SaaS B2B.
-
-## Top segments
-1. **Startups séries A/B (50–200 employés)**
-2. **ScaleUps SaaS RGPD/SOC2**
-3. **Cabinets de conseil tech**
-
-## Prochain pas
-Lancer la mission de positionnement.`,
-      json: {
-        venture: 'Audit Visibilité',
-        priorityScore: 82,
-        recommendedNextStep: 'positioning',
-      },
-    },
-  },
-  latestDeliverableByAgent: {
-    analyst: 'deliverable-seed-analyst',
-  },
-
-  selectedAgentId: 'strategist',
+  selectedAgentId: null,
   contextMenu: null,
   banner: null,
   drawerAgentId: null,
   openDeliverableId: null,
-  showOfflineReport: true,
-  offlineReport: {
-    agentId: 'analyst',
-    agentName: 'Analyste Marché',
-    tasksCompleted: 3,
-    creditsSpent: 150,
-    revenueGenerated: 320,
-    deliverableTitles: [
-      "Scan d'opportunité — segment SaaS B2B",
-      'Brief de positionnement — Lumen.audit',
-      "Plan d'attaque LinkedIn outbound",
-    ],
-  },
+  showNewVentureModal: false,
+  showOfflineReport: false,
+  offlineReport: null,
+  briefChat: null,
+  briefingModal: null,
 
   selectAgent: (id) => set({ selectedAgentId: id }),
 
@@ -828,11 +855,11 @@ Lancer la mission de positionnement.`,
       return { agents: { ...s.agents, [id]: { ...agent, emote } } }
     }),
 
-  startMission: (agentId, templateId) => {
-    get().enqueueMission(agentId, templateId)
+  startMission: (agentId, templateId, contextDeliverableId) => {
+    get().enqueueMission(agentId, templateId, contextDeliverableId)
   },
 
-  enqueueMission: (agentId, templateId) => {
+  enqueueMission: (agentId, templateId, contextDeliverableId) => {
     const state = get()
     const agent = state.agents[agentId]
     if (!agent || agent.state === 'locked') return
@@ -859,7 +886,13 @@ Lancer la mission de positionnement.`,
       set({
         agents: {
           ...state.agents,
-          [agentId]: { ...agent, taskQueue: [...agent.taskQueue, templateId as string] },
+          [agentId]: {
+            ...agent,
+            taskQueue: [
+              ...agent.taskQueue,
+              { templateId: templateId as string, contextDeliverableId: contextDeliverableId ?? null },
+            ],
+          },
         },
         banner: {
           tone: 'info',
@@ -869,10 +902,15 @@ Lancer la mission de positionnement.`,
       return
     }
 
-    void executeAgentMission(agentId, templateId, {
-      ventureName: state.ventureName,
-      ventureSubtitle: state.ventureSubtitle,
-    })
+    void executeAgentMission(
+      agentId,
+      templateId,
+      {
+        ventureName: state.ventureName,
+        ventureSubtitle: state.ventureSubtitle,
+      },
+      contextDeliverableId ?? null,
+    )
   },
 
   tickMissions: (now) =>
@@ -913,8 +951,97 @@ Lancer la mission de positionnement.`,
           changed = true
         }
       }
+
+      /* Passive sales engine — fires roughly every 10s when products exist. */
+      let passiveSaleLastCheckedAt = s.passiveSaleLastCheckedAt
+      let realRevenue = s.realRevenue
+      let banner = s.banner
+      let lastSaleAt = s.lastSaleAt
+      let lastSaleAmount = s.lastSaleAmount
+      const SALE_INTERVAL_MS = 10000
+      const due = now - s.passiveSaleLastCheckedAt >= SALE_INTERVAL_MS
+      const eligibleProducts = s.activeProducts.filter(
+        (p) => p.ventureId === s.activeVentureId,
+      )
+      if (due && eligibleProducts.length > 0) {
+        passiveSaleLastCheckedAt = now
+        const probability = Math.min(0.85, 0.25 + 0.12 * eligibleProducts.length)
+        if (Math.random() < probability) {
+          const product =
+            eligibleProducts[Math.floor(Math.random() * eligibleProducts.length)]!
+          const reward = product.price
+          realRevenue = realRevenue + reward
+          lastSaleAt = now
+          lastSaleAmount = reward
+          banner = product.synergyBonus
+            ? {
+                tone: 'success',
+                message: `[Vente Synergique] Un client a acheté votre service bonifié · +${reward}€`,
+              }
+            : {
+                tone: 'success',
+                message: `Vente passive — ${product.title} · +${reward}€`,
+              }
+          changed = true
+          queueMicrotask(() => {
+            useGame
+              .getState()
+              .pushLog(
+                product.agentId,
+                product.synergyBonus
+                  ? `[Vente Synergique] ${product.title} acheté · +${reward}€`
+                  : `Vente passive · ${product.title} · +${reward}€`,
+              )
+            useGame
+              .getState()
+              .pushSystemLog(
+                'ROUTER',
+                `HTTP POST /api/v1/checkout — 200 OK · order_${product.id.slice(-6)} · ${reward}€`,
+              )
+          })
+        } else {
+          changed = true
+        }
+      }
+
+      /* System / infra log stream — only when there's signal worth narrating. */
+      let systemLogLastAt = s.systemLogLastAt
+      const hasActiveProducts = eligibleProducts.length > 0
+      const hasWorkingAgent = Object.values(s.agents).some(
+        (a) => a.state === 'working' || a.state === 'walking',
+      )
+      const SYSTEM_LOG_MIN_MS = 5000
+      const SYSTEM_LOG_MAX_MS = 10000
+      if (hasActiveProducts || hasWorkingAgent) {
+        const sinceLast = now - s.systemLogLastAt
+        if (sinceLast >= SYSTEM_LOG_MIN_MS) {
+          const rollWindow = SYSTEM_LOG_MAX_MS - SYSTEM_LOG_MIN_MS
+          const ratio = Math.min(1, (sinceLast - SYSTEM_LOG_MIN_MS) / rollWindow)
+          if (Math.random() < 0.25 + ratio * 0.55) {
+            systemLogLastAt = now
+            queueMicrotask(() => {
+              const entry = pickSystemLogEntry(
+                hasActiveProducts,
+                hasWorkingAgent,
+              )
+              useGame.getState().pushSystemLog(entry.channel, entry.message)
+            })
+            changed = true
+          }
+        }
+      }
+
       if (!changed) return s
-      return { missions, agents }
+      return {
+        missions,
+        agents,
+        passiveSaleLastCheckedAt,
+        realRevenue,
+        banner,
+        lastSaleAt,
+        lastSaleAmount,
+        systemLogLastAt,
+      }
     }),
 
   completeMission: (agentId) => {
@@ -922,10 +1049,26 @@ Lancer la mission de positionnement.`,
     const agent = state.agents[agentId]
     if (!agent || agent.state !== 'delivered') return
     const mission = state.missions[agentId]
-    const reward = mission?.reward ?? 120
+    const baseReward = mission?.reward ?? 120
     const nextMissions = { ...state.missions }
     delete nextMissions[agentId]
     const deliverableId = state.latestDeliverableByAgent[agentId] ?? null
+    const deliverable = deliverableId ? state.deliverables[deliverableId] : null
+    const synergyBonus = Boolean(deliverable?.parentDeliverableId)
+    const finalPrice = synergyBonus ? Math.round(baseReward * 1.3) : baseReward
+    const archivedProduct: ActiveProduct = {
+      id: `product-${agentId}-${Date.now()}`,
+      ventureId: state.activeVentureId,
+      deliverableId,
+      agentId,
+      agentName: agent.name,
+      title: mission?.output ?? 'Service Autars',
+      price: finalPrice,
+      basePrice: baseReward,
+      synergyBonus,
+      createdAt: Date.now(),
+      status: 'active',
+    }
     set({
       agents: {
         ...state.agents,
@@ -938,13 +1081,22 @@ Lancer la mission de positionnement.`,
         },
       },
       missions: nextMissions,
-      realRevenue: state.realRevenue + reward,
-      xp: state.xp + Math.round(reward / 4),
+      activeProducts: [...state.activeProducts, archivedProduct],
+      xp: state.xp + Math.round(finalPrice / 4),
       reputation: Math.min(100, state.reputation + 4),
-      banner: { tone: 'success', message: `Livrable vendu · +${reward}€` },
+      banner: synergyBonus
+        ? { tone: 'success', message: `Livrable synergique archivé · +30% (${finalPrice}€)` }
+        : { tone: 'success', message: 'Livrable prêt et archivé' },
       openDeliverableId: deliverableId,
     })
-    useGame.getState().pushLog(agentId, `Livrable validé — +${reward}€ revenus réels`)
+    useGame
+      .getState()
+      .pushLog(
+        agentId,
+        synergyBonus
+          ? `Livrable synergique archivé — prix bonifié ${finalPrice}€`
+          : 'Livrable prêt et archivé dans le marché',
+      )
     // Return to idle (or auto-chain the next queued mission) after a short celebration.
     setTimeout(() => {
       const s2 = get()
@@ -952,17 +1104,22 @@ Lancer la mission de positionnement.`,
       if (!a2 || a2.state !== 'celebrating') return
 
       if (a2.taskQueue.length > 0) {
-        const [nextTemplateId, ...rest] = a2.taskQueue
+        const [nextTask, ...rest] = a2.taskQueue
         set({
           agents: {
             ...s2.agents,
             [agentId]: { ...a2, state: 'idle', emote: null, taskQueue: rest },
           },
         })
-        void executeAgentMission(agentId, nextTemplateId as keyof typeof MISSION_TEMPLATES, {
-          ventureName: s2.ventureName,
-          ventureSubtitle: s2.ventureSubtitle,
-        })
+        void executeAgentMission(
+          agentId,
+          nextTask!.templateId as keyof typeof MISSION_TEMPLATES,
+          {
+            ventureName: s2.ventureName,
+            ventureSubtitle: s2.ventureSubtitle,
+          },
+          nextTask!.contextDeliverableId ?? null,
+        )
         return
       }
 
@@ -1002,7 +1159,7 @@ Lancer la mission de positionnement.`,
             emote: '✓',
           },
         },
-        banner: { tone: 'success', message: `${agent.name} rejoint l\'équipe !` },
+        banner: { tone: 'success', message: `${agent.name} rejoint l'équipe !` },
       }
     }),
 
@@ -1044,8 +1201,121 @@ Lancer la mission de positionnement.`,
     }))
   },
 
+  pushSystemLog: (channel, message) => {
+    set((s) => ({
+      logs: [
+        {
+          id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          ts: Date.now(),
+          agentId: `__${channel.toLowerCase()}`,
+          agentName: channel,
+          message,
+        },
+        ...s.logs,
+      ].slice(0, 100),
+    }))
+  },
+
   openAgentDrawer: (id) => set({ drawerAgentId: id }),
   openDeliverable: (id) => set({ openDeliverableId: id }),
+
+  openNewVentureModal: () => set({ showNewVentureModal: true }),
+  closeNewVentureModal: () => set({ showNewVentureModal: false }),
+
+  setActiveVenture: (id) =>
+    set((s) => {
+      const v = s.ventures[id]
+      if (!v) return s
+      return {
+        activeVentureId: id,
+        ventureName: v.name,
+        ventureSubtitle: v.subtitle,
+        level: v.level,
+        levelLabel: v.levelLabel,
+        stage: v.stage,
+        passiveSaleLastCheckedAt: performance.now(),
+      }
+    }),
+
+  createVenture: (data) => {
+    const slug = data.name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '')
+    const id = `${slug || 'venture'}-${Date.now().toString(36)}`
+    const themePool = ['#7B7BEC', '#22D3EE', '#34D399', '#F97316', '#C084FC', '#FBBF24']
+    const themeColor = themePool[Math.floor(Math.random() * themePool.length)]!
+    const newVenture: Venture = {
+      id,
+      name: data.name,
+      subtitle: data.subtitle,
+      industry: data.industry,
+      level: 1,
+      levelLabel: 'Solo Builder',
+      stage: 'Idée validée',
+      status: 'active',
+      monthlyRevenue: 0,
+      agentCount: 1,
+      tagline: data.subtitle,
+      launchedLabel: `Lancée ${new Date().toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}`,
+      themeColor,
+    }
+
+    const freshAgents = makeAgents()
+    const starterId = data.starterAgentId
+    for (const aId of Object.keys(freshAgents)) {
+      const a = freshAgents[aId]!
+      if (aId === starterId) {
+        freshAgents[aId] = {
+          ...a,
+          state: 'idle',
+          workspaceId: a.homeWorkspaceId,
+          progress: 0,
+          emote: null,
+          level: 1,
+          reliability: 70,
+          impactLabel: 'Nouvelle recrue',
+          unlockCost: undefined,
+        }
+      } else {
+        freshAgents[aId] = {
+          ...a,
+          state: 'locked',
+          workspaceId: null,
+          progress: 0,
+          emote: null,
+          unlockCost: a.unlockCost ?? 250,
+        }
+      }
+    }
+
+    set((s) => ({
+      ventures: { ...s.ventures, [id]: newVenture },
+      ventureOrder: [...s.ventureOrder, id],
+      activeVentureId: id,
+      ventureName: newVenture.name,
+      ventureSubtitle: newVenture.subtitle,
+      level: newVenture.level,
+      levelLabel: newVenture.levelLabel,
+      stage: newVenture.stage,
+      agents: freshAgents,
+      missions: {},
+      logs: [],
+      deliverables: {},
+      latestDeliverableByAgent: {},
+      passiveSaleLastCheckedAt: performance.now(),
+      selectedAgentId: starterId,
+      showNewVentureModal: false,
+      banner: {
+        tone: 'success',
+        message: `${newVenture.name} créée — bienvenue dans votre nouveau QG.`,
+      },
+    }))
+
+    return id
+  },
 
   closeOfflineReport: () => set({ showOfflineReport: false }),
   collectOfflineReport: () => {
@@ -1068,7 +1338,343 @@ Lancer la mission de positionnement.`,
       },
     })
   },
+
+  openBriefChat: (missionKey, contextDeliverableId) => {
+    const s = get()
+    const meta = MISSION_META[missionKey]
+    if (!meta) return
+    const agent = s.agents[meta.agentId]
+    if (!agent || agent.state === 'locked') {
+      set({
+        banner: {
+          tone: 'warning',
+          message: `${meta.agentId} non disponible — recrute-le d'abord.`,
+        },
+      })
+      return
+    }
+    set({
+      briefChat: {
+        missionKey,
+        agentId: meta.agentId,
+        ventureId: s.activeVentureId,
+        messages: [],
+        status: 'briefing',
+        contextDeliverableId: contextDeliverableId ?? null,
+      },
+      contextMenu: null,
+      briefingModal: null,
+    })
+    if (contextDeliverableId) {
+      const d = s.deliverables[contextDeliverableId]
+      if (d) {
+        get().pushLog(meta.agentId, `[Système] : Chargement du contexte ${d.missionTitle}...`)
+      }
+    }
+    void streamBriefAssistantTurn()
+  },
+
+  openBriefingModal: (payload) =>
+    set({
+      briefingModal: {
+        ...payload,
+        missionKey: 'missionKey' in payload ? payload.missionKey : undefined,
+        missionTemplateId:
+          'missionTemplateId' in payload ? payload.missionTemplateId : undefined,
+      },
+      contextMenu: null,
+    }),
+  closeBriefingModal: () => set({ briefingModal: null }),
+  confirmBriefingModal: (contextDeliverableId) => {
+    const s = get()
+    const m = s.briefingModal
+    if (!m) return
+    set({ briefingModal: null })
+    if (m.mode === 'live' && m.missionKey) {
+      get().openBriefChat(m.missionKey, contextDeliverableId)
+    } else if (m.mode === 'enqueue' && m.missionTemplateId) {
+      get().enqueueMission(
+        m.agentId,
+        m.missionTemplateId as keyof typeof MISSION_TEMPLATES,
+        contextDeliverableId,
+      )
+    }
+  },
+
+  closeBriefChat: () => set({ briefChat: null }),
+
+  sendBriefUserMessage: async (text) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const s = get()
+    const chat = s.briefChat
+    if (!chat || chat.status === 'streaming' || chat.status === 'running') return
+    set({
+      briefChat: {
+        ...chat,
+        messages: [...chat.messages, { role: 'user', content: trimmed }],
+        status: 'briefing',
+      },
+    })
+    await streamBriefAssistantTurn()
+  },
+
+  runRealMission: async () => {
+    const s = get()
+    const chat = s.briefChat
+    if (!chat) return
+    const agent = s.agents[chat.agentId]
+    if (!agent) return
+    const meta = MISSION_META[chat.missionKey]
+
+    const venture: VentureContext = {
+      name: s.ventureName,
+      subtitle: s.ventureSubtitle,
+      industry: s.ventures[s.activeVentureId]?.industry ?? 'Inconnu',
+    }
+
+    const missionId = `mission-${agent.id}-${Date.now()}`
+    set({
+      briefChat: { ...chat, status: 'running' },
+      agents: {
+        ...s.agents,
+        [agent.id]: {
+          ...agent,
+          state: 'working',
+          workspaceId: meta.workspace,
+          progress: 0,
+          emote: null,
+        },
+      },
+      missions: {
+        ...s.missions,
+        [agent.id]: {
+          id: missionId,
+          agentId: agent.id,
+          title: meta.title,
+          output: meta.output,
+          templateId: chat.missionKey,
+          durationMs: 30000,
+          creditCost: 0,
+          reward: 0,
+          startedAt: performance.now(),
+          progress: 0.05,
+          done: false,
+          contextDeliverableId: chat.contextDeliverableId ?? null,
+        },
+      },
+      banner: {
+        tone: 'info',
+        message: `${agent.name} lance ${meta.output.toLowerCase()} — streaming`,
+      },
+    })
+
+    if (chat.contextDeliverableId) {
+      const parent = s.deliverables[chat.contextDeliverableId]
+      if (parent) {
+        get().pushLog(
+          agent.id,
+          `[Système] : Transmission du livrable précédent à ${agent.name}...`,
+        )
+        get().pushLog(
+          agent.id,
+          `[Système] : Contexte chargé · ${parent.missionTitle} (par ${parent.agentName})`,
+        )
+      }
+    }
+    get().pushLog(agent.id, `Mission lancée : ${meta.title}`)
+
+    let markdown = ''
+    let buffer = ''
+    let bumpTimer: ReturnType<typeof setInterval> | null = null
+    try {
+      bumpTimer = setInterval(() => {
+        const m = useGame.getState().missions[agent.id]
+        if (!m || m.id !== missionId) return
+        const next = Math.min(0.92, m.progress + 0.02)
+        useGame.setState((st) => ({
+          missions: { ...st.missions, [agent.id]: { ...m, progress: next } },
+          agents: {
+            ...st.agents,
+            [agent.id]: { ...st.agents[agent.id]!, progress: next },
+          },
+        }))
+      }, 800)
+
+      for await (const ev of streamMission(chat.missionKey, venture, chat.messages)) {
+        if (ev.type === 'tool') {
+          get().pushLog(agent.id, `[outil] ${ev.name ?? 'web_search'} appelé…`)
+          continue
+        }
+        if (ev.type === 'tool_result') {
+          get().pushLog(agent.id, `[outil] résultats reçus`)
+          continue
+        }
+        if (ev.type !== 'delta' || !ev.text) continue
+        markdown += ev.text
+        buffer += ev.text
+        const newlineIdx = buffer.lastIndexOf('\n')
+        if (newlineIdx >= 0) {
+          const ready = buffer.slice(0, newlineIdx)
+          buffer = buffer.slice(newlineIdx + 1)
+          for (const line of ready.split('\n')) {
+            const t = line.trim()
+            if (t.length > 2) get().pushLog(agent.id, t.slice(0, 140))
+          }
+        }
+      }
+      if (buffer.trim().length > 2) {
+        get().pushLog(agent.id, buffer.trim().slice(0, 140))
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erreur LLM inconnue'
+      set({
+        briefChat: { ...get().briefChat!, status: 'error', error: msg },
+        banner: { tone: 'warning', message: `Scan interrompu : ${msg}` },
+      })
+      const sNow = useGame.getState()
+      const agentNow = sNow.agents[agent.id]
+      if (agentNow) {
+        useGame.setState({
+          agents: {
+            ...sNow.agents,
+            [agent.id]: { ...agentNow, state: 'idle', progress: 0, emote: '!' },
+          },
+        })
+      }
+      return
+    } finally {
+      if (bumpTimer) clearInterval(bumpTimer)
+    }
+
+    const deliverableId = `deliverable-${missionId}`
+    const deliverable: MissionDeliverable = {
+      id: deliverableId,
+      agentId: agent.id,
+      agentName: agent.name,
+      missionTitle: meta.output,
+      generatedAt: Date.now(),
+      markdown,
+      json: {
+        source: 'claude-opus-4-7',
+        missionKey: chat.missionKey,
+        briefTurns: chat.messages.length,
+      },
+      parentDeliverableId: chat.contextDeliverableId ?? null,
+    }
+
+    useGame.setState((st) => {
+      const agentNow = st.agents[agent.id]!
+      const mNow = st.missions[agent.id]
+      return {
+        deliverables: { ...st.deliverables, [deliverableId]: deliverable },
+        latestDeliverableByAgent: {
+          ...st.latestDeliverableByAgent,
+          [agent.id]: deliverableId,
+        },
+        missions: mNow
+          ? { ...st.missions, [agent.id]: { ...mNow, progress: 1, done: true } }
+          : st.missions,
+        agents: {
+          ...st.agents,
+          [agent.id]: { ...agentNow, state: 'delivered', progress: 1, emote: '!' },
+        },
+        briefChat: null,
+        banner: {
+          tone: 'success',
+          message: `${meta.output} prêt — valide le livrable`,
+        },
+      }
+    })
+
+    get().pushLog(agent.id, `Livrable généré : ${meta.output}`)
+  },
 }))
+
+/* ============================================================
+   System / infra log entries — picked randomly to flavour the
+   activity console with realistic DevOps chatter.
+   ============================================================ */
+
+interface SystemLogEntry {
+  channel: 'SYSTEM' | 'ROUTER' | 'DATABASE'
+  message: string
+}
+
+const SYSTEM_LOG_POOL_ACTIVE: SystemLogEntry[] = [
+  { channel: 'SYSTEM', message: 'Outbound Campaign: Scanned 12 new prospects on LinkedIn.' },
+  { channel: 'ROUTER', message: 'HTTP GET /api/v1/landing — 200 OK from User_7421 (Agent_IA)' },
+  { channel: 'ROUTER', message: 'HTTP GET /assets/og-card.png — 200 OK · cache HIT' },
+  { channel: 'DATABASE', message: 'Context vectorized and cached successfully.' },
+  { channel: 'DATABASE', message: 'pgvector index refreshed · 1842 embeddings · 84ms' },
+  { channel: 'SYSTEM', message: 'Healthcheck OK · web-1, web-2, db-primary nominal.' },
+  { channel: 'SYSTEM', message: 'Background job · enrich_prospect(batch=24) succeeded.' },
+]
+
+const SYSTEM_LOG_POOL_WORKING: SystemLogEntry[] = [
+  { channel: 'DATABASE', message: 'Snapshot agent context · 4.2MB → S3://autars-runs/' },
+  { channel: 'SYSTEM', message: 'Token usage · 18.4k in / 6.1k out · cost €0.041' },
+  { channel: 'ROUTER', message: 'HTTP POST /api/v1/llm/stream — 200 streaming…' },
+]
+
+function pickSystemLogEntry(
+  hasActiveProducts: boolean,
+  hasWorkingAgent: boolean,
+): SystemLogEntry {
+  const pool: SystemLogEntry[] = []
+  if (hasActiveProducts) pool.push(...SYSTEM_LOG_POOL_ACTIVE)
+  if (hasWorkingAgent) pool.push(...SYSTEM_LOG_POOL_WORKING)
+  if (pool.length === 0) pool.push(...SYSTEM_LOG_POOL_ACTIVE)
+  return pool[Math.floor(Math.random() * pool.length)]!
+}
+
+async function streamBriefAssistantTurn() {
+  const s = useGame.getState()
+  const chat = s.briefChat
+  if (!chat) return
+  const venture: VentureContext = {
+    name: s.ventureName,
+    subtitle: s.ventureSubtitle,
+    industry: s.ventures[s.activeVentureId]?.industry ?? 'Inconnu',
+  }
+  const missionKey = chat.missionKey
+  useGame.setState({
+    briefChat: {
+      ...chat,
+      status: 'streaming',
+      messages: [...chat.messages, { role: 'assistant', content: '' }],
+    },
+  })
+
+  let acc = ''
+  try {
+    for await (const chunk of streamBriefTurn(missionKey, venture, chat.messages)) {
+      acc += chunk
+      useGame.setState((st) => {
+        const c = st.briefChat
+        if (!c) return st
+        const msgs = c.messages.slice()
+        msgs[msgs.length - 1] = { role: 'assistant', content: acc }
+        return { briefChat: { ...c, messages: msgs } }
+      })
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Erreur LLM inconnue'
+    useGame.setState((st) => {
+      const c = st.briefChat
+      if (!c) return st
+      return { briefChat: { ...c, status: 'error', error: msg } }
+    })
+    return
+  }
+
+  const ready = acc.includes('BRIEF_READY')
+  useGame.setState((st) => {
+    const c = st.briefChat
+    if (!c) return st
+    return { briefChat: { ...c, status: ready ? 'ready' : 'briefing' } }
+  })
+}
 
 /* ============================================================
    executeAgentMission
@@ -1083,6 +1689,7 @@ export function executeAgentMission(
   agentId: string,
   templateId: keyof typeof MISSION_TEMPLATES,
   context: { ventureName: string; ventureSubtitle: string },
+  contextDeliverableId: string | null = null,
 ) {
   const store = useGame.getState()
   const agent = store.agents[agentId]
@@ -1102,6 +1709,9 @@ export function executeAgentMission(
   const missionId = `mission-${agentId}-${Date.now()}`
   const wsId = template.workspaceFor(agentId)
   const startedAt = performance.now() + 1200
+  const ctxDeliverable = contextDeliverableId
+    ? store.deliverables[contextDeliverableId] ?? null
+    : null
 
   useGame.setState({
     creditsUsedThisMonth: store.creditsUsedThisMonth + template.creditCost,
@@ -1129,12 +1739,27 @@ export function executeAgentMission(
         startedAt,
         progress: 0,
         done: false,
+        contextDeliverableId: contextDeliverableId ?? null,
       },
     },
     contextMenu: null,
     banner: { tone: 'info', message: `${agent.name} démarre "${template.title}"` },
   })
 
+  if (ctxDeliverable) {
+    useGame
+      .getState()
+      .pushLog(
+        agentId,
+        `[Système] : Transmission du livrable précédent à ${agent.name}...`,
+      )
+    useGame
+      .getState()
+      .pushLog(
+        agentId,
+        `[Système] : Contexte chargé · ${ctxDeliverable.missionTitle} (par ${ctxDeliverable.agentName})`,
+      )
+  }
   useGame.getState().pushLog(agentId, `Mission lancée : ${template.title}`)
 
   // Schedule the activity script so it streams while the mission runs.
@@ -1169,6 +1794,7 @@ export function executeAgentMission(
       generatedAt: Date.now(),
       markdown: generated.markdown,
       json: generated.json,
+      parentDeliverableId: contextDeliverableId ?? null,
     }
     useGame.setState((s) => ({
       deliverables: { ...s.deliverables, [deliverableId]: deliverable },
@@ -1176,6 +1802,29 @@ export function executeAgentMission(
     }))
     useGame.getState().pushLog(agentId, `Livrable généré : ${template.output}`)
   }, 1200 + template.durationMs + 200)
+}
+
+/* ============================================================
+   Backend context bridge
+
+   Returns a Markdown block ready to prepend to a mission prompt when a
+   prior deliverable is used as context. Returns null when no parent
+   deliverable is attached. The backend handler can call this through the
+   exposed selector to enrich the system prompt.
+   ============================================================ */
+
+export function buildMissionPromptContext(deliverableId: string | null | undefined): string | null {
+  if (!deliverableId) return null
+  const d = useGame.getState().deliverables[deliverableId]
+  if (!d) return null
+  return [
+    `## Contexte transmis par l'agent précédent`,
+    `_${d.missionTitle} — produit par ${d.agentName} le ${new Date(
+      d.generatedAt,
+    ).toLocaleString('fr-FR')}_`,
+    '',
+    d.markdown.trim(),
+  ].join('\n')
 }
 
 /* ============================================================

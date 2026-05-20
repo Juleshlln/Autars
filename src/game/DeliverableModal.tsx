@@ -8,16 +8,25 @@ type ViewMode = 'markdown' | 'json'
 export function DeliverableModal() {
   const openId = useGame((s) => s.openDeliverableId)
   const deliverable = useGame(useShallow((s) => (s.openDeliverableId ? s.deliverables[s.openDeliverableId] : null)))
+  const parentDeliverable = useGame(
+    useShallow((s) => {
+      const cur = s.openDeliverableId ? s.deliverables[s.openDeliverableId] : null
+      const parentId = cur?.parentDeliverableId
+      return parentId ? s.deliverables[parentId] ?? null : null
+    }),
+  )
   const close = useGame((s) => s.openDeliverable)
-  const [view, setView] = useState<ViewMode>('markdown')
-  const [copied, setCopied] = useState(false)
+  const openDeliverable = useGame((s) => s.openDeliverable)
+  const [viewState, setViewState] = useState<{ openId: string | null; view: ViewMode }>({
+    openId: null,
+    view: 'markdown',
+  })
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const view = viewState.openId === openId ? viewState.view : 'markdown'
+  const copied = copiedId === openId
 
   useEffect(() => {
-    if (!openId) {
-      setCopied(false)
-      setView('markdown')
-      return
-    }
+    if (!openId) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close(null)
     }
@@ -34,9 +43,13 @@ export function DeliverableModal() {
     if (!deliverable) return
     const content = view === 'markdown' ? deliverable.markdown : JSON.stringify(deliverable.json, null, 2)
     void navigator.clipboard?.writeText(content).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1800)
+      setCopiedId(openId)
+      setTimeout(() => setCopiedId(null), 1800)
     })
+  }
+
+  function changeView(nextView: ViewMode) {
+    setViewState({ openId, view: nextView })
   }
 
   function handleDownload(kind: 'md' | 'json') {
@@ -58,21 +71,21 @@ export function DeliverableModal() {
   return (
     <AnimatePresence>
       {openId && deliverable && (
-        <>
-          <motion.div
-            key="deliv-backdrop"
-            className="deliv-backdrop"
-            onClick={() => close(null)}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          />
+        <motion.div
+          key="deliv-backdrop"
+          className="deliv-backdrop"
+          onClick={() => close(null)}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+        >
           <motion.div
             key="deliv-modal"
             className="deliv-modal"
             role="dialog"
             aria-modal="true"
             aria-label={`Livrable — ${deliverable.missionTitle}`}
+            onClick={(e) => e.stopPropagation()}
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 12 }}
@@ -86,6 +99,20 @@ export function DeliverableModal() {
                   Généré par {deliverable.agentName} ·{' '}
                   {new Date(deliverable.generatedAt).toLocaleString('fr-FR')}
                 </p>
+                {parentDeliverable && (
+                  <button
+                    type="button"
+                    className="deliv-lineage"
+                    onClick={() => openDeliverable(parentDeliverable.id)}
+                    title="Ouvrir le livrable parent"
+                  >
+                    <span aria-hidden>🔗</span>
+                    <span>
+                      Dérivé de : <strong>{parentDeliverable.missionTitle}</strong>
+                      <em> (par {parentDeliverable.agentName})</em>
+                    </span>
+                  </button>
+                )}
               </div>
               <div className="deliv-actions">
                 <div className="deliv-tabs" role="tablist">
@@ -94,7 +121,7 @@ export function DeliverableModal() {
                     role="tab"
                     aria-selected={view === 'markdown'}
                     className={view === 'markdown' ? 'is-active' : ''}
-                    onClick={() => setView('markdown')}
+                    onClick={() => changeView('markdown')}
                   >
                     Rapport
                   </button>
@@ -103,7 +130,7 @@ export function DeliverableModal() {
                     role="tab"
                     aria-selected={view === 'json'}
                     className={view === 'json' ? 'is-active' : ''}
-                    onClick={() => setView('json')}
+                    onClick={() => changeView('json')}
                   >
                     JSON
                   </button>
@@ -141,7 +168,7 @@ export function DeliverableModal() {
               </button>
             </footer>
           </motion.div>
-        </>
+        </motion.div>
       )}
     </AnimatePresence>
   )

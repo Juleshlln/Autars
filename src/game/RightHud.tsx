@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { useGame, MISSION_TEMPLATES } from './store'
+import { useShallow } from 'zustand/react/shallow'
+import { useGame, MISSION_TEMPLATES, type ActiveProduct } from './store'
 
 export function RightHud() {
   const selectedId = useGame((s) => s.selectedAgentId)
@@ -144,18 +145,141 @@ export function RightHud() {
           </motion.div>
         ) : (
           <motion.div
-            key="empty"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="hud-empty"
+            key="infra"
+            initial={{ opacity: 0, x: 12 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 12 }}
+            transition={{ duration: 0.18 }}
           >
-            <div className="hud-empty-icon">◉</div>
-            <h3>Sélectionne un agent</h3>
-            <p>Clique sur une silhouette dans le QG pour voir ses statistiques détaillées.</p>
+            <InfrastructurePanel />
           </motion.div>
         )}
       </AnimatePresence>
     </aside>
+  )
+}
+
+function InfrastructurePanel() {
+  const hqLevel = useGame((s) => s.hqLevel)
+  const activeVentureId = useGame((s) => s.activeVentureId)
+  const ventureName = useGame((s) => s.ventureName)
+  const products = useGame(
+    useShallow((s) =>
+      s.activeProducts.filter((p) => p.ventureId === activeVentureId),
+    ),
+  )
+  const workingAgents = useGame(
+    (s) =>
+      Object.values(s.agents).filter(
+        (a) => a.state === 'working' || a.state === 'walking',
+      ).length,
+  )
+  const realRevenue = useGame((s) => s.realRevenue)
+
+  const webInstances = Math.min(8, 2 + Math.max(0, hqLevel - 1))
+  const dbUptime = (99.9 - (workingAgents > 4 ? 0.1 : 0)).toFixed(1)
+  const cpuLoad = Math.min(94, 18 + workingAgents * 14 + products.length * 6)
+
+  return (
+    <section className="infra-panel" aria-label="Infrastructure de la filiale">
+      <header className="infra-head">
+        <p className="hud-eyebrow">Infrastructure</p>
+        <h3>Production &amp; Clusters</h3>
+        <p className="hud-sub">{ventureName} · stack temps réel</p>
+      </header>
+
+      <ul className="infra-list">
+        <InfraRow
+          label="Load Balancer"
+          status="Active"
+          tone="ok"
+          right="haproxy/2.8"
+        />
+        <InfraRow
+          label="Web Servers"
+          status={`${webInstances} / ${webInstances} Instances en ligne`}
+          tone="ok"
+          right="nginx · :443"
+        />
+        <InfraRow
+          label="Database (Postgres IA)"
+          status={`Synchro (${dbUptime}% uptime)`}
+          tone="ok"
+          right="pgvector"
+        />
+        <InfraRow
+          label="LLM Gateway"
+          status={workingAgents > 0 ? 'Streaming' : 'Idle'}
+          tone={workingAgents > 0 ? 'pulse' : 'muted'}
+          right={`load ${cpuLoad}%`}
+        />
+      </ul>
+
+      <div className="infra-section">
+        <p className="infra-section-label">Containers actifs</p>
+        {products.length === 0 ? (
+          <p className="infra-empty">
+            Aucun service déployé. Valide un livrable pour le pousser en production.
+          </p>
+        ) : (
+          <ul className="infra-container-list">
+            {products.slice(0, 5).map((p) => (
+              <ContainerRow key={p.id} product={p} />
+            ))}
+            {products.length > 5 && (
+              <li className="infra-container-more">
+                + {products.length - 5} containers supplémentaires
+              </li>
+            )}
+          </ul>
+        )}
+      </div>
+
+      <footer className="infra-foot">
+        <div>
+          <span>Revenu cumulé</span>
+          <strong className="hud-mono">{realRevenue}€</strong>
+        </div>
+        <div>
+          <span>QG</span>
+          <strong>Niv. {hqLevel}</strong>
+        </div>
+      </footer>
+    </section>
+  )
+}
+
+function InfraRow({
+  label,
+  status,
+  tone,
+  right,
+}: {
+  label: string
+  status: string
+  tone: 'ok' | 'pulse' | 'muted'
+  right: string
+}) {
+  return (
+    <li className={`infra-row infra-row-${tone}`}>
+      <span className="infra-dot" aria-hidden />
+      <div className="infra-row-text">
+        <span className="infra-row-label">{label}</span>
+        <strong className="infra-row-status">{status}</strong>
+      </div>
+      <em className="infra-row-meta">{right}</em>
+    </li>
+  )
+}
+
+function ContainerRow({ product }: { product: ActiveProduct }) {
+  const containerId = `ox-${product.id.slice(-4)}`
+  return (
+    <li className="infra-container">
+      <span className="infra-container-id">[Container id: {containerId}]</span>
+      <span className="infra-container-title">{product.title}</span>
+      <span className="infra-container-running">Running</span>
+    </li>
   )
 }
 

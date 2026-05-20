@@ -22,7 +22,9 @@ export function GameScreen({ onBackToHub }: Props) {
   const ventureName = useGame((s) => s.ventureName)
   const ventureSubtitle = useGame((s) => s.ventureSubtitle)
   const workingCount = useGame((s) => Object.values(s.agents).filter((a) => a.state === 'working' || a.state === 'walking').length)
+  const deliveredCount = useGame((s) => Object.values(s.agents).filter((a) => a.state === 'delivered').length)
   const totalAgents = useGame((s) => Object.values(s.agents).filter((a) => a.state !== 'locked').length)
+  const monitorStatus = deliveredCount > 0 ? 'Validation requise' : workingCount > 0 ? 'Flux actifs' : 'Veille active'
 
   useEffect(() => {
     if (!banner) return
@@ -71,22 +73,35 @@ export function GameScreen({ onBackToHub }: Props) {
             </div>
           </div>
 
-          <PixiCanvas className="game-canvas" />
-
-          <footer className="stage-legend" aria-hidden>
-            <span>
-              <i className="dot dot-working" /> En mission
-            </span>
-            <span>
-              <i className="dot dot-delivered" /> Livrable prêt
-            </span>
-            <span>
-              <i className="dot dot-locked" /> Recrutement
-            </span>
-            <span>
-              <i className="dot dot-core" /> Autars Core
-            </span>
-          </footer>
+          <div className="stage-monitor-screen">
+            <PixiCanvas className="game-canvas" />
+            <div className="stage-monitor-grid" aria-hidden />
+            <div className="stage-monitor-scan" aria-hidden />
+            <div className="stage-monitor-corners" aria-hidden>
+              <i />
+              <i />
+              <i />
+              <i />
+            </div>
+            <div className="stage-monitor-status" aria-hidden>
+              <span>{monitorStatus}</span>
+              {deliveredCount > 0 && <strong>{deliveredCount} prêt{deliveredCount > 1 ? 's' : ''}</strong>}
+            </div>
+            <footer className="stage-legend" aria-hidden>
+              <span>
+                <i className="dot dot-working" /> En mission
+              </span>
+              <span>
+                <i className="dot dot-delivered" /> Livrable prêt
+              </span>
+              <span>
+                <i className="dot dot-locked" /> Recrutement
+              </span>
+              <span>
+                <i className="dot dot-core" /> Autars Core
+              </span>
+            </footer>
+          </div>
         </section>
 
         <ActivityConsole />

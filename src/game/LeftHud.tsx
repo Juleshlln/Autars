@@ -21,6 +21,7 @@ export function LeftHud() {
   const credits = useGame((s) => s.credits)
   const reputation = useGame((s) => s.reputation)
   const agents = useGame(useShallow(selectAgentsArray))
+  const missions = useGame((s) => s.missions)
   const hqLevel = useGame((s) => s.hqLevel)
   const upgradeHQ = useGame((s) => s.upgradeHQ)
   const selectAgent = useGame((s) => s.selectAgent)
@@ -153,6 +154,11 @@ export function LeftHud() {
                 </div>
                 {(a.state === 'working' || a.state === 'walking') && (
                   <span className="hud-roster-progress">{Math.round(a.progress * 100)}%</span>
+                )}
+                {missions[a.id]?.contextDeliverableId && (
+                  <span className="hud-roster-context" title="Contexte chargé">
+                    Contexte
+                  </span>
                 )}
                 {a.state !== 'locked' && a.taskQueue.length > 0 && (
                   <span className="hud-roster-badge" title={`${a.taskQueue.length} en attente`}>

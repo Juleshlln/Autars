@@ -3,11 +3,21 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { GameScreen } from './GameScreen'
 import { HubScreen } from './HubScreen'
 import { ErrorBoundary } from './ErrorBoundary'
+import { NewVentureModal } from './NewVentureModal'
+import { BriefChatModal } from './BriefChatModal'
+import { BriefingModal } from './BriefingModal'
+import { useGame } from './store'
 
 type Route = 'hub' | 'hq'
 
 export function AppRoot() {
   const [route, setRoute] = useState<Route>('hub')
+  const setActiveVenture = useGame((s) => s.setActiveVenture)
+
+  const enterHQ = (ventureId: string) => {
+    setActiveVenture(ventureId)
+    setRoute('hq')
+  }
 
   return (
     <ErrorBoundary>
@@ -20,7 +30,7 @@ export function AppRoot() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.22 }}
           >
-            <HubScreen onEnterHQ={() => setRoute('hq')} />
+            <HubScreen onEnterHQ={enterHQ} />
           </motion.div>
         ) : (
           <motion.div
@@ -34,6 +44,10 @@ export function AppRoot() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      <NewVentureModal onComplete={enterHQ} />
+      <BriefChatModal />
+      <BriefingModal />
     </ErrorBoundary>
   )
 }

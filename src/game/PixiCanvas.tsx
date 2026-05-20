@@ -12,9 +12,15 @@ import {
   TILE,
 } from './office'
 import { makeAgentEntity, type AgentEntityHandle } from './AgentEntity'
-import { useGame, type AgentRuntime } from './store'
+import { useGame, type AgentLifeState, type AgentRuntime } from './store'
 
 const BG = 0x0a0b11
+
+interface IdlePlan {
+  currentTargetId: string
+  nextMoveAt: number
+  cycle: number
+}
 
 interface Props {
   className?: string
@@ -33,6 +39,10 @@ export function PixiCanvas({ className }: Props) {
   const hqLevelRef = useRef<number>(0)
   const lastParticleSpawnRef = useRef<Map<string, number>>(new Map())
   const viewportRef = useRef<Viewport | null>(null)
+  const idlePlansRef = useRef<Map<string, IdlePlan>>(new Map())
+  const lastAgentStateRef = useRef<Map<string, AgentLifeState>>(new Map())
+  const lastInboundSpawnRef = useRef<number>(0)
+  const lastSaleAtRef = useRef<number>(0)
 
   /* Setup once */
   useEffect(() => {
@@ -40,6 +50,7 @@ export function PixiCanvas({ className }: Props) {
     const host = hostRef.current
     const app = new Application()
     appRef.current = app
+    const agentEntities = agentsRef.current
     let disposed = false
 
     async function setup() {
@@ -118,20 +129,22 @@ export function PixiCanvas({ className }: Props) {
       for (const id of state.agentOrder) {
         const a = state.agents[id]
         if (!a) continue
+        // eslint-disable-next-line react-hooks/immutability
         spawnAgent(a)
       }
 
       // FPS-style background subscription: pull from store via ticker (avoid re-renders)
-      const tickerFn = (_: Ticker) => syncFromStore()
+      // eslint-disable-next-line react-hooks/immutability
+      const tickerFn = () => syncFromStore(performance.now())
       Ticker.shared.add(tickerFn)
-      ;(app as Application & { __tickerFn?: (t: Ticker) => void }).__tickerFn = tickerFn
+      ;(app as Application & { __tickerFn?: () => void }).__tickerFn = tickerFn
 
       // mission progress driver
-      const missionTicker = (_: Ticker) => {
+      const missionTicker = () => {
         useGame.getState().tickMissions(performance.now())
       }
       Ticker.shared.add(missionTicker)
-      ;(app as Application & { __missionTicker?: (t: Ticker) => void }).__missionTicker =
+      ;(app as Application & { __missionTicker?: () => void }).__missionTicker =
         missionTicker
 
       // Caption above core
@@ -150,7 +163,7 @@ export function PixiCanvas({ className }: Props) {
       vp.addChild(caption)
 
       // First-time sync
-      syncFromStore()
+      syncFromStore(performance.now())
     }
 
     setup().catch((e) => {
@@ -161,19 +174,20 @@ export function PixiCanvas({ className }: Props) {
       disposed = true
       const a = appRef.current
       if (a) {
-        const tickerFn = (a as Application & { __tickerFn?: (t: Ticker) => void }).__tickerFn
-        const missionTicker = (a as Application & { __missionTicker?: (t: Ticker) => void })
+        const tickerFn = (a as Application & { __tickerFn?: () => void }).__tickerFn
+        const missionTicker = (a as Application & { __missionTicker?: () => void })
           .__missionTicker
         if (tickerFn) Ticker.shared.remove(tickerFn)
         if (missionTicker) Ticker.shared.remove(missionTicker)
         coreRef.current?.destroy()
-        for (const [, ent] of agentsRef.current) ent.destroy()
-        agentsRef.current.clear()
+        for (const [, ent] of agentEntities) ent.destroy()
+        agentEntities.clear()
         officeRef.current?.destroy()
         a.destroy(true, { children: true, texture: false })
       }
       appRef.current = null
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /* ============================================================
@@ -219,7 +233,7 @@ export function PixiCanvas({ className }: Props) {
   }
 
   /* Sync runtime state from the Zustand store to PIXI every frame. */
-  function syncFromStore() {
+  function syncFromStore(now: number) {
     const state = useGame.getState()
     // HQ level change → rebuild office
     if (state.hqLevel !== hqLevelRef.current) {
@@ -245,16 +259,79 @@ export function PixiCanvas({ className }: Props) {
       const a = state.agents[id]
       const ent = agentsRef.current.get(id)
       if (!a || !ent) continue
-      const ws = a.workspaceId ? state.workspaces[a.workspaceId] : null
-      if (ws) ent.setTargetTile(ws.x, ws.y)
+      const prevState = lastAgentStateRef.current.get(id)
       ent.setLifeState(a.state)
       ent.setEmote(a.emote)
       ent.setProgress(a.progress)
+      const ws = a.workspaceId ? state.workspaces[a.workspaceId] : null
+      if (a.state === 'idle') {
+        if (prevState !== a.state) {
+          const home = state.workspaces[a.homeWorkspaceId]
+          idlePlansRef.current.set(id, {
+            currentTargetId: a.homeWorkspaceId,
+            nextMoveAt: now + idleDelayFor(a, 0),
+            cycle: 0,
+          })
+          if (home) ent.setIdleTargetTile(home.x, home.y, prevState !== undefined)
+        }
+        driveIdleAgent(a, ent, state, now)
+      } else {
+        idlePlansRef.current.delete(id)
+        if (ws) ent.setTargetTile(ws.x, ws.y)
+      }
+      lastAgentStateRef.current.set(id, a.state)
     }
 
     drawFlowLines(state)
     spawnFlowParticles(state)
+    spawnInboundTraffic(state, now)
+    handleSaleEvents(state)
     updateCoreIntensity(state)
+  }
+
+  /* Server-rack tile coords (matches WORKSPACES.server in store.ts) */
+  function serverPosition() {
+    return { x: 20 * TILE + TILE * 0.5, y: 11 * TILE - 6 }
+  }
+
+  /* Inbound network packets — small cyan pulses falling from the "internet"
+     (top of the map) toward the server rack whenever a product is online. */
+  function spawnInboundTraffic(
+    state: ReturnType<typeof useGame.getState>,
+    now: number,
+  ) {
+    const host = particleHostRef.current
+    const tex = particleTexRef.current
+    if (!host || !tex) return
+    const products = state.activeProducts.filter(
+      (p) => p.ventureId === state.activeVentureId,
+    )
+    if (products.length === 0) return
+    const interval = Math.max(380, 1100 - products.length * 140)
+    if (now - lastInboundSpawnRef.current < interval) return
+    lastInboundSpawnRef.current = now
+    const target = serverPosition()
+    const fromX = 6 * TILE + Math.random() * (OFFICE_PX_W - 12 * TILE)
+    spawnParticle(
+      host,
+      tex,
+      { x: fromX, y: TILE * 0.5 },
+      target,
+      0x22d3ee,
+      1300,
+    )
+  }
+
+  /* Sale events — gold/green shockwave from the server + floating "+N€" text. */
+  function handleSaleEvents(state: ReturnType<typeof useGame.getState>) {
+    if (state.lastSaleAt === lastSaleAtRef.current) return
+    lastSaleAtRef.current = state.lastSaleAt
+    if (state.lastSaleAt === 0) return
+    const vp = viewportRef.current
+    if (!vp) return
+    const pos = serverPosition()
+    spawnSaleShockwave(vp, pos.x, pos.y)
+    spawnSalePopup(vp, pos.x, pos.y - 24, state.lastSaleAmount)
   }
 
   function drawFlowLines(state: ReturnType<typeof useGame.getState>) {
@@ -323,10 +400,130 @@ export function PixiCanvas({ className }: Props) {
     coreRef.current?.setIntensity(1 + working * 0.25)
   }
 
+  function driveIdleAgent(
+    agent: AgentRuntime,
+    ent: AgentEntityHandle,
+    state: ReturnType<typeof useGame.getState>,
+    now: number,
+  ) {
+    if (!ent.isAtTarget()) return
+    let plan = idlePlansRef.current.get(agent.id)
+    if (!plan) {
+      plan = {
+        currentTargetId: agent.homeWorkspaceId,
+        nextMoveAt: now + idleDelayFor(agent, 0),
+        cycle: 0,
+      }
+      idlePlansRef.current.set(agent.id, plan)
+    }
+    if (now < plan.nextMoveAt) return
+
+    const target = pickIdleTarget(agent, state, plan)
+    if (!target) return
+
+    plan.currentTargetId = target.id
+    plan.cycle += 1
+    plan.nextMoveAt = now + idleDelayFor(agent, plan.cycle)
+    ent.setIdleTargetTile(target.x, target.y, true)
+  }
+
   return <div ref={hostRef} className={className} />
+}
+
+function idleDelayFor(agent: AgentRuntime, cycle: number) {
+  return 2800 + ((agent.spriteSeed + cycle) % 5) * 900
+}
+
+function pickIdleTarget(
+  agent: AgentRuntime,
+  state: ReturnType<typeof useGame.getState>,
+  plan: IdlePlan,
+) {
+  const preferred = idleTargetIds(agent)
+    .map((id) => state.workspaces[id])
+    .filter(Boolean)
+  if (preferred.length === 0) return state.workspaces[agent.homeWorkspaceId] ?? null
+
+  let index = (agent.spriteSeed + plan.cycle) % preferred.length
+  if (preferred.length > 1 && preferred[index]?.id === plan.currentTargetId) {
+    index = (index + 1) % preferred.length
+  }
+  return preferred[index] ?? preferred[0] ?? null
+}
+
+function idleTargetIds(agent: AgentRuntime) {
+  const home = agent.homeWorkspaceId
+  if (agent.id === 'analyst') return [home, 'whiteboard', 'coffee']
+  if (agent.id === 'brandBuilder') return [home, 'computer-2', 'brainstorm', 'coffee']
+  if (agent.id === 'offerArchitect') return [home, 'brainstorm', 'whiteboard', 'coffee']
+  if (agent.id === 'growthOperator') return [home, 'server', 'brainstorm', 'coffee']
+  return [home, 'computer-1', 'whiteboard', 'coffee']
 }
 
 function hexFromColor(s: string): number {
   if (s.startsWith('#')) return parseInt(s.slice(1), 16)
   return parseInt(s, 16)
+}
+
+/* Gold-green expanding ring centered on the server rack on every sale. */
+function spawnSaleShockwave(parent: Container, x: number, y: number) {
+  const ring = new Graphics()
+  ring.zIndex = 8
+  ring.x = x
+  ring.y = y
+  parent.addChild(ring)
+  const start = performance.now()
+  const duration = 950
+  const tickerFn = (ticker: Ticker) => {
+    const t = Math.min(1, (performance.now() - start) / duration)
+    const radius = 8 + t * 140
+    ring.clear()
+    ring.circle(0, 0, radius).stroke({
+      color: 0xfacc15,
+      width: 3 - t * 2,
+      alpha: 0.85 * (1 - t),
+    })
+    ring.circle(0, 0, radius * 0.65).stroke({
+      color: 0x34d399,
+      width: 2 - t * 1.4,
+      alpha: 0.7 * (1 - t),
+    })
+    if (t >= 1) {
+      Ticker.shared.remove(tickerFn)
+      ring.destroy()
+    }
+    void ticker
+  }
+  Ticker.shared.add(tickerFn)
+}
+
+/* Floating "+N€" popup that rises from the server on each sale. */
+function spawnSalePopup(parent: Container, x: number, y: number, amount: number) {
+  const label = new Text({
+    text: `+${amount}€`,
+    style: {
+      fill: 0xfde68a,
+      fontSize: 11,
+      fontFamily: 'Press Start 2P, "Courier New", monospace',
+      stroke: { color: 0x0a0518, width: 3 },
+    },
+  })
+  label.anchor.set(0.5, 1)
+  label.x = x
+  label.y = y
+  label.zIndex = 9
+  parent.addChild(label)
+  const start = performance.now()
+  const duration = 1400
+  const tickerFn = (ticker: Ticker) => {
+    const t = Math.min(1, (performance.now() - start) / duration)
+    label.y = y - t * 36
+    label.alpha = t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85
+    if (t >= 1) {
+      Ticker.shared.remove(tickerFn)
+      label.destroy()
+    }
+    void ticker
+  }
+  Ticker.shared.add(tickerFn)
 }

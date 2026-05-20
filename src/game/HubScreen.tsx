@@ -17,6 +17,7 @@ export function HubScreen({ onEnterHQ }: Props) {
   const founderLevel = useGame((s) => s.founderLevel)
   const founderTitle = useGame((s) => s.founderTitle)
   const activeId = useGame((s) => s.activeVentureId)
+  const openNewVentureModal = useGame((s) => s.openNewVentureModal)
 
   const kpis = useMemo(() => {
     const totalMRR = ventures.reduce((a, v) => a + v.monthlyRevenue, 0)
@@ -72,7 +73,7 @@ export function HubScreen({ onEnterHQ }: Props) {
             <h2>Vos filiales</h2>
             <p>Sélectionnez une compagnie pour piloter son QG en temps réel.</p>
           </div>
-          <button type="button" className="hub-launch">
+          <button type="button" className="hub-launch" onClick={openNewVentureModal}>
             <span>＋ Lancer une nouvelle filiale</span>
           </button>
         </header>
@@ -142,13 +143,26 @@ export function HubScreen({ onEnterHQ }: Props) {
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: ventures.length * 0.06, ease: [0.16, 1, 0.3, 1] }}
+            onClick={openNewVentureModal}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') openNewVentureModal()
+            }}
           >
             <div className="hub-add-icon" aria-hidden>
               ＋
             </div>
             <h3>Nouvelle filiale</h3>
             <p>Brief, agents recrutables, marché cible — préparez votre prochaine compagnie.</p>
-            <button type="button" className="hub-card-cta hub-card-cta-ghost">
+            <button
+              type="button"
+              className="hub-card-cta hub-card-cta-ghost"
+              onClick={(e) => {
+                e.stopPropagation()
+                openNewVentureModal()
+              }}
+            >
               Démarrer un brief
             </button>
           </motion.article>

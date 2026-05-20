@@ -10,6 +10,7 @@ export interface AgentEntityHandle {
   container: Container
   agentId: string
   setTargetTile: (tileX: number, tileY: number) => void
+  setIdleTargetTile: (tileX: number, tileY: number, walk: boolean) => void
   setLifeState: (state: AgentLifeState) => void
   setEmote: (e: string | null) => void
   setProgress: (p: number) => void
@@ -68,17 +69,21 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
   bubble.y = -renderH - 12
   bubble.zIndex = 5
   const bubbleBg = new Graphics()
-  bubbleBg.roundRect(-12, -16, 24, 22, 4).fill({ color: 0xfafafa }).stroke({ color: 0x1a1320, width: 2 })
-  bubbleBg.moveTo(-4, 6).lineTo(0, 12).lineTo(4, 6).fill({ color: 0xfafafa }).stroke({
-    color: 0x1a1320,
-    width: 2,
+  bubbleBg
+    .roundRect(-13, -17, 26, 23, 5)
+    .fill({ color: 0x08111f, alpha: 0.92 })
+    .stroke({ color: 0x22d3ee, width: 1.5, alpha: 0.9 })
+  bubbleBg.moveTo(-4, 6).lineTo(0, 12).lineTo(4, 6).fill({ color: 0x08111f, alpha: 0.92 }).stroke({
+    color: 0x22d3ee,
+    width: 1.5,
+    alpha: 0.9,
   })
   bubble.addChild(bubbleBg)
   const bubbleText = new Text({
     text: agent.emote ?? '',
     style: {
-      fill: 0x1a1320,
-      fontFamily: 'Press Start 2P, "Courier New", monospace',
+      fill: 0xe0f2fe,
+      fontFamily: 'JetBrains Mono, "Courier New", monospace',
       fontSize: 12,
       fontWeight: 'bold',
     },
@@ -87,6 +92,37 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
   bubbleText.y = -4
   bubble.addChild(bubbleText)
   container.addChild(bubble)
+
+  const deliveryHalo = new Graphics()
+  deliveryHalo.ellipse(0, -2, 27, 9).stroke({ color: 0x34d399, width: 2, alpha: 0.7 })
+  deliveryHalo.visible = false
+  deliveryHalo.zIndex = 0
+  container.addChild(deliveryHalo)
+
+  const deliveryTag = new Container()
+  deliveryTag.visible = false
+  deliveryTag.y = -renderH - 38
+  deliveryTag.zIndex = 6
+  const deliveryBg = new Graphics()
+  deliveryBg
+    .roundRect(-26, -10, 52, 20, 5)
+    .fill({ color: 0x071512, alpha: 0.94 })
+    .stroke({ color: 0x34d399, width: 1.5, alpha: 0.95 })
+  deliveryTag.addChild(deliveryBg)
+  const deliveryText = new Text({
+    text: 'PRÊT',
+    style: {
+      fill: 0xd1fae5,
+      fontFamily: 'JetBrains Mono, Inter, Arial, sans-serif',
+      fontSize: 7,
+      fontWeight: '700',
+      letterSpacing: 1,
+    },
+  })
+  deliveryText.anchor.set(0.5)
+  deliveryText.y = -1
+  deliveryTag.addChild(deliveryText)
+  container.addChild(deliveryTag)
 
   // Segmented crafting-style progress bar
   const progressBar = new Container()
@@ -134,18 +170,25 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
   let targetY = container.y
   let progress = agent.progress
   let selected = false
+  let ambientWalking = false
   let bubbleBob = 0
   let workBob = 0
+  let deliveryPulse = 0
   let clickCb: ((sx: number, sy: number) => void) | null = null
 
   function refreshTexture() {
+    const walkingVisual = life === 'walking' || ambientWalking
     let kind: 'idle' | 'walkA' | 'walkB' | 'work' | 'celebrate' | 'locked' = 'idle'
     if (life === 'locked') kind = 'locked'
-    else if (life === 'walking') kind = walkToggle ? 'walkA' : 'walkB'
+    else if (walkingVisual) kind = walkToggle ? 'walkA' : 'walkB'
     else if (life === 'working') kind = 'work'
     else if (life === 'celebrating' || life === 'delivered') kind = 'celebrate'
-    else kind = 'idle'
     sprite.texture = getSpriteTexture(agent.palette, kind, facing === 'left', isStrategist)
+  }
+
+  function updateDeliveryCue() {
+    deliveryTag.visible = life === 'delivered'
+    deliveryHalo.visible = life === 'delivered' || life === 'celebrating'
   }
 
   function updateProgressBar() {
@@ -191,6 +234,7 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
   refreshTexture()
   updateBubble()
   updateProgressBar()
+  updateDeliveryCue()
 
   const tickerFn = (ticker: Ticker) => {
     const dt = ticker.deltaMS / 1000
@@ -200,15 +244,16 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
     if (frameTimer > 0.18) {
       frameTimer = 0
       walkToggle = !walkToggle
-      if (life === 'walking') refreshTexture()
+      if (life === 'walking' || ambientWalking) refreshTexture()
     }
 
     // Movement
     const dx = targetX - container.x
     const dy = targetY - container.y
     const dist = Math.hypot(dx, dy)
-    if (dist > 0.5 && life === 'walking') {
-      const speed = WALK_SPEED
+    const canMove = life === 'walking' || ambientWalking
+    if (dist > 0.5 && canMove) {
+      const speed = ambientWalking && life === 'idle' ? WALK_SPEED * 0.58 : WALK_SPEED
       const step = Math.min(dist, speed * dt)
       container.x += (dx / dist) * step
       container.y += (dy / dist) * step
@@ -217,10 +262,14 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
         facing = newFacing
         refreshTexture()
       }
-    } else if (life === 'walking' && dist <= 0.5) {
+    } else if (canMove && dist <= 0.5) {
       // arrived
       container.x = targetX
       container.y = targetY
+      if (ambientWalking) {
+        ambientWalking = false
+        refreshTexture()
+      }
       // do NOT auto-transition here; the scene / store decides what's next.
     }
 
@@ -228,6 +277,13 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
     if (bubble.visible) {
       bubbleBob += dt
       bubble.y = -renderH - 12 + Math.sin(bubbleBob * 4) * 2
+    }
+
+    if (deliveryTag.visible || deliveryHalo.visible) {
+      deliveryPulse += dt
+      deliveryTag.y = -renderH - 38 + Math.sin(deliveryPulse * 3.4) * 2
+      deliveryHalo.alpha = 0.5 + Math.sin(deliveryPulse * 4.6) * 0.28
+      deliveryHalo.scale.set(1 + Math.sin(deliveryPulse * 3.2) * 0.12)
     }
 
     // Working subtle bob
@@ -260,14 +316,25 @@ export function makeAgentEntity(agent: AgentRuntime): AgentEntityHandle {
     container,
     agentId: agent.id,
     setTargetTile(tileX, tileY) {
+      if (life !== 'idle') ambientWalking = false
       targetX = (tileX + 0.5) * TILE
       targetY = (tileY + 1) * TILE
     },
-    setLifeState(state) {
-      life = state
-      ring.visible = selected
+    setIdleTargetTile(tileX, tileY, walk) {
+      if (life !== 'idle') return
+      targetX = (tileX + 0.5) * TILE
+      targetY = (tileY + 1) * TILE
+      ambientWalking = walk && Math.hypot(targetX - container.x, targetY - container.y) > 1
       refreshTexture()
+    },
+    setLifeState(state) {
+      const changed = life !== state
+      life = state
+      if (state !== 'idle') ambientWalking = false
+      ring.visible = selected
+      if (changed) refreshTexture()
       updateProgressBar()
+      updateDeliveryCue()
     },
     setEmote(e) {
       agent.emote = e

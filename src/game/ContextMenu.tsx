@@ -1,14 +1,18 @@
 import { useEffect } from 'react'
-import { useGame, MISSION_TEMPLATES } from './store'
+import { useGame } from './store'
+import { getMissionsForAgent, type MissionCatalogEntry, type MissionKey } from './missions'
 
 export function ContextMenu() {
   const menu = useGame((s) => s.contextMenu)
   const agents = useGame((s) => s.agents)
   const close = useGame((s) => s.closeContextMenu)
-  const enqueueMission = useGame((s) => s.enqueueMission)
   const selectAgent = useGame((s) => s.selectAgent)
   const completeMission = useGame((s) => s.completeMission)
   const unlockAgent = useGame((s) => s.unlockAgent)
+  const openBriefChat = useGame((s) => s.openBriefChat)
+  const enqueueMission = useGame((s) => s.enqueueMission)
+  const openBriefingModal = useGame((s) => s.openBriefingModal)
+  const hasDeliverables = useGame((s) => Object.keys(s.deliverables).length > 0)
   const credits = useGame((s) => s.credits)
 
   useEffect(() => {
@@ -58,36 +62,41 @@ export function ContextMenu() {
   } else {
     const verb =
       agent.state === 'working' || agent.state === 'walking' ? 'Empiler' : 'Lancer'
-    if (agent.id === 'analyst') {
+
+    const launch = (entry: MissionCatalogEntry) => {
+      if (entry.mode === 'live' && entry.missionKey) {
+        if (hasDeliverables) {
+          openBriefingModal({
+            agentId: agent.id,
+            mode: 'live',
+            missionKey: entry.missionKey,
+            title: entry.title,
+          })
+        } else {
+          openBriefChat(entry.missionKey as MissionKey, null)
+        }
+      } else if (entry.mode === 'synthetic' && entry.templateId) {
+        if (hasDeliverables) {
+          openBriefingModal({
+            agentId: agent.id,
+            mode: 'enqueue',
+            missionTemplateId: entry.templateId,
+            title: entry.title,
+          })
+        } else {
+          enqueueMission(agent.id, entry.templateId as never, null)
+        }
+      }
+    }
+
+    for (const entry of getMissionsForAgent(agent.id)) {
       items.push({
-        label: `${verb} · Scan d'opportunité`,
-        onClick: () => enqueueMission(agent.id, 'scan'),
-        tone: 'primary',
-        hint: `-${MISSION_TEMPLATES.scan.creditCost} crédits · +${MISSION_TEMPLATES.scan.reward}€`,
+        label: `${verb} · ${entry.title}`,
+        onClick: () => launch(entry),
+        tone: entry.mode === 'live' ? 'success' : undefined,
+        hint: entry.hint,
       })
     }
-    if (agent.id === 'strategist') {
-      items.push({
-        label: `${verb} · Positionnement`,
-        onClick: () => enqueueMission(agent.id, 'positioning'),
-        tone: 'primary',
-        hint: `-${MISSION_TEMPLATES.positioning.creditCost} crédits · +${MISSION_TEMPLATES.positioning.reward}€`,
-      })
-    }
-    if (agent.id === 'brandBuilder') {
-      items.push({
-        label: `${verb} · Kit de marque`,
-        onClick: () => enqueueMission(agent.id, 'branding'),
-        tone: 'primary',
-        hint: `-${MISSION_TEMPLATES.branding.creditCost} crédits · +${MISSION_TEMPLATES.branding.reward}€`,
-      })
-    }
-    items.push({
-      label: `${verb} · Mission Marketing`,
-      onClick: () => enqueueMission(agent.id, 'marketing'),
-      tone: 'primary',
-      hint: `-${MISSION_TEMPLATES.marketing.creditCost} crédits · +${MISSION_TEMPLATES.marketing.reward}€`,
-    })
   }
 
   items.push({
@@ -98,7 +107,6 @@ export function ContextMenu() {
     },
   })
 
-  // Clamp so it doesn't escape the viewport
   const left = Math.min(menu.screenX, window.innerWidth - 240)
   const top = Math.min(menu.screenY, window.innerHeight - 260)
 
