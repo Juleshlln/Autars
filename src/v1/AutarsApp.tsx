@@ -58,13 +58,19 @@ import type { Agent, MainGoal, Mission, Project, ProjectType } from '../lib/type
 import { useGame, type ActiveProduct, type AgentLifeState } from '../game/store'
 import { useShallow } from 'zustand/react/shallow'
 import { defaultAgents, mainGoals, projectTypes, quickActions } from './data'
+import { useAutarsBackend } from './useAutarsBackend'
+import type { ActivityEvent } from '../services/activityService'
+import { isSupabaseConfigured } from '../lib/supabaseClient'
 import {
-  createLocalUser,
-  createMissionPayload,
-  createProjectPayload,
-  loadSnapshot,
-  saveSnapshot,
-} from './storage'
+  AgentsGamificationGrid,
+  BusinessBadges,
+  BusinessScoreCard,
+  HQProgressHeader,
+  MissionsRoadmap,
+  NextBestMission,
+  SkinsPanel,
+  useGamification,
+} from './gamification'
 import './autars.css'
 
 type Route = 'landing' | 'login' | 'signup' | 'onboarding' | 'dashboard'
@@ -97,12 +103,10 @@ function routeFromPath(pathname: string): Route {
 }
 
 export default function AutarsApp() {
-  const [initial] = useState(() => loadSnapshot())
+  const backend = useAutarsBackend()
+  const { state } = backend
+  const { user, project, agents, missions, activity, mode, status, error } = state
   const [route, setRoute] = useState<Route>(() => routeFromPath(window.location.pathname))
-  const [user, setUser] = useState(initial.user)
-  const [project, setProject] = useState<Project | null>(initial.project)
-  const [agents, setAgents] = useState<Agent[]>(initial.agents)
-  const [missions, setMissions] = useState<Mission[]>(initial.missions)
   const { theme, toggle } = useTheme()
 
   const navigate = useCallback((next: Route, mode: 'push' | 'replace' = 'push') => {
@@ -120,74 +124,46 @@ export default function AutarsApp() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  useEffect(() => {
-    saveSnapshot({ user, project, agents, missions })
-  }, [agents, missions, project, user])
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setMissions((current) =>
-        current.map((mission) => {
-          if (mission.status !== 'en cours' || mission.progress >= 92) return mission
-          return { ...mission, progress: Math.min(92, mission.progress + 4) }
-        }),
-      )
-    }, 4200)
-    return () => window.clearInterval(interval)
-  }, [])
-
-  const startSignup = (email: string) => {
-    const nextUser = createLocalUser(email)
-    setUser(nextUser)
-    navigate('onboarding')
+  const startSignup = async (email: string, password?: string) => {
+    try {
+      await backend.signUp(email, password)
+      navigate('onboarding')
+    } catch {
+      /* error surfaced through state.error */
+    }
   }
 
-  const signIn = (email: string) => {
-    const nextUser = project
-      ? {
-          id: project.userId,
-          email,
-          name: email.split('@')[0] || 'Fondateur Autars',
-          createdAt: project.createdAt,
-        }
-      : createLocalUser(email)
-    setUser(nextUser)
-    navigate(project ? 'dashboard' : 'onboarding')
+  const signIn = async (email: string, password?: string) => {
+    try {
+      await backend.signIn(email, password)
+      navigate(project ? 'dashboard' : 'onboarding')
+    } catch {
+      /* error surfaced through state.error */
+    }
   }
 
-  const logout = () => {
-    setUser(null)
+  const logout = async () => {
+    await backend.signOut()
     navigate('landing')
   }
 
-  const completeOnboarding = (payload: {
+  const completeOnboarding = async (payload: {
     name: string
     description: string
     projectType: ProjectType
     mainGoal: MainGoal
   }) => {
     if (!user) return
-    const created = createProjectPayload({ userId: user.id, ...payload })
-    setProject(created.project)
-    setAgents(created.agents)
-    setMissions(created.missions)
-    navigate('dashboard')
+    try {
+      await backend.createWorkspace(payload)
+      navigate('dashboard')
+    } catch {
+      /* error surfaced through state.error */
+    }
   }
 
   const createMission = (payload: { agentId: string; title: string; description: string }) => {
-    if (!project) return
-    const mission = createMissionPayload({
-      projectId: project.id,
-      agentId: payload.agentId,
-      title: payload.title,
-      description: payload.description,
-    })
-    setMissions((current) => [mission, ...current])
-    setAgents((current) =>
-      current.map((agent) =>
-        agent.id === payload.agentId ? { ...agent, status: 'travaille' } : agent,
-      ),
-    )
+    void backend.createMission(payload)
   }
 
   const activeRoute: Route =
@@ -199,8 +175,30 @@ export default function AutarsApp() {
         ? 'onboarding'
         : route
 
+  const backendBanner =
+    status === 'error' && error ? (
+      <div className="backend-banner backend-banner-error" role="alert">
+        <strong>Erreur backend</strong>
+        <span>{error}</span>
+      </div>
+    ) : null
+
+  const devHint =
+    mode === 'local' && !isSupabaseConfigured ? (
+      <div className="backend-banner backend-banner-info" role="status">
+        <strong>Mode local</strong>
+        <span>
+          Supabase non configuré. Définissez <code>VITE_SUPABASE_URL</code> et{' '}
+          <code>VITE_SUPABASE_ANON_KEY</code> dans <code>.env.local</code> pour activer les
+          vraies données.
+        </span>
+      </div>
+    ) : null
+
   return (
     <div className="autars-app">
+      {backendBanner}
+      {devHint}
       <AnimatePresence mode="wait">
         {activeRoute === 'landing' && (
           <motion.div key="landing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -254,6 +252,8 @@ export default function AutarsApp() {
               project={project}
               agents={agents.length ? agents : hydrateAgents(project.id)}
               missions={missions}
+              activity={activity}
+              backendMode={mode}
               onToggleTheme={toggle}
               onLogout={logout}
               onCreateMission={createMission}
@@ -670,7 +670,7 @@ function AuthScreen({
   onToggleTheme: () => void
   onHome: () => void
   onSwitch: () => void
-  onSubmit: (email: string) => void
+  onSubmit: (email: string, password: string) => void | Promise<void>
 }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -684,7 +684,7 @@ function AuthScreen({
       return
     }
     setError('')
-    onSubmit(email.trim().toLowerCase())
+    void onSubmit(email.trim().toLowerCase(), password)
   }
 
   return (
@@ -933,6 +933,8 @@ function DashboardPage({
   project,
   agents,
   missions,
+  activity,
+  backendMode,
   onToggleTheme,
   onLogout,
   onCreateMission,
@@ -942,6 +944,8 @@ function DashboardPage({
   project: Project
   agents: Agent[]
   missions: Mission[]
+  activity: ActivityEvent[]
+  backendMode: 'supabase' | 'local'
   onToggleTheme: () => void
   onLogout: () => void
   onCreateMission: (payload: { agentId: string; title: string; description: string }) => void
@@ -956,6 +960,8 @@ function DashboardPage({
 
   const monitorRef = useRef<HTMLDivElement>(null)
   const lastDeliveredRef = useRef(0)
+
+  const gamification = useGamification(project.id)
 
   const liveAgents = useMemo(
     () =>
@@ -1085,6 +1091,8 @@ function DashboardPage({
         </div>
       </section>
 
+      <HQProgressHeader api={gamification} projectName={project.name} />
+
       <section
         ref={monitorRef}
         className="live-qg-monitor"
@@ -1142,6 +1150,19 @@ function DashboardPage({
 
       <section className="dashboard-layout">
         <div className="dashboard-main-column">
+          <NextBestMission
+            mission={gamification.nextBestMission}
+            onStart={gamification.startMission}
+          />
+
+          <MissionsRoadmap
+            missions={gamification.missions}
+            agents={gamification.agents}
+            onStart={gamification.startMission}
+            onComplete={gamification.completeMission}
+            onValidate={gamification.validateMission}
+          />
+
           <DashboardSection
             title="Agents IA"
             subtitle="Votre première équipe opérationnelle."
@@ -1209,10 +1230,17 @@ function DashboardPage({
             </div>
           </DashboardSection>
 
+          <AgentsGamificationGrid
+            agents={gamification.agents}
+            skins={gamification.skins}
+            onSelectSkin={gamification.selectAgentSkin}
+          />
+
           <NetworkConsoleSection />
         </div>
 
         <aside className="dashboard-side-column">
+          <BusinessScoreCard scores={gamification.dimensionScores} />
           <DashboardSection title="Actions rapides" subtitle="Lancez une mission simple.">
             <div className="quick-action-list">
               {quickActions.map((action) => (
@@ -1223,7 +1251,11 @@ function DashboardPage({
               ))}
             </div>
           </DashboardSection>
+          {backendMode === 'supabase' && (
+            <ActivityFeedSection events={activity} />
+          )}
           <InfrastructureSection />
+          <BusinessBadges badges={gamification.badges} />
           <DashboardSection title="Décisions à valider" subtitle="Contrôle fondateur.">
             <div className="decision-list">
               <div>
@@ -1242,6 +1274,14 @@ function DashboardPage({
           </DashboardSection>
         </aside>
       </section>
+
+      <SkinsPanel
+        skins={gamification.skins}
+        agents={gamification.agents}
+        activeHQSkinId={gamification.activeHQSkinId}
+        hqLevel={gamification.hqLevel}
+        onSelectHQSkin={gamification.selectHQSkin}
+      />
 
       {modal && (
         <div className="modal-backdrop" role="presentation" onClick={() => setModal(null)}>
@@ -1681,6 +1721,40 @@ function formatLogTime(ts: number) {
   const d = new Date(ts)
   const pad = (n: number) => n.toString().padStart(2, '0')
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function ActivityFeedSection({ events }: { events: ActivityEvent[] }) {
+  return (
+    <DashboardSection
+      title="Activité live"
+      subtitle="Évènements remontés depuis Supabase."
+      action={<span>{events.length} évènement{events.length > 1 ? 's' : ''}</span>}
+    >
+      {events.length === 0 ? (
+        <p className="activity-empty">
+          Aucun évènement pour le moment. Lancez une mission pour voir le feed se remplir.
+        </p>
+      ) : (
+        <ul className="activity-feed">
+          {events.slice(0, 12).map((event) => (
+            <li key={event.id} className={`activity-item activity-${event.type}`}>
+              <time>{formatActivityTime(event.createdAt)}</time>
+              <div>
+                <strong>{event.title}</strong>
+                {event.description && <p>{event.description}</p>}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </DashboardSection>
+  )
+}
+
+function formatActivityTime(value: string) {
+  const d = new Date(value)
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 function DashboardSection({
