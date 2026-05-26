@@ -78,7 +78,7 @@ export function createProjectPayload({
     createdAt: now,
   }))
 
-  const missions = seedMissions.map((mission) => ({
+  const missions = seedMissions.map((mission, idx) => ({
     id: crypto.randomUUID(),
     projectId,
     agentId: mission.agentId,
@@ -87,6 +87,11 @@ export function createProjectPayload({
     status: 'en cours' as const,
     progress: mission.progress,
     createdAt: now,
+    costCredits: 1,
+    orderIndex: idx + 1,
+    xpReward: 20,
+    type: null,
+    result: null,
   }))
 
   return {
@@ -124,5 +129,10 @@ export function createMissionPayload({
     status: 'en cours',
     progress: 12,
     createdAt: new Date().toISOString(),
+    costCredits: 1,
+    orderIndex: null,
+    xpReward: 20,
+    type: null,
+    result: null,
   }
 }

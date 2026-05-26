@@ -3384,3 +3384,156 @@ button.gam-skin-card { font-family: inherit; }
 .gam-skin-rarity.rarity-epic { background: rgba(168, 85, 247, 0.85); }
 .gam-skin-rarity.rarity-legendary { background: linear-gradient(120deg, #f97316, #fbbf24); color: #3a1d04; }
 
+/* ---- Credits chip + banner ---- */
+.credits-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  background: rgba(108, 108, 227, 0.10);
+  border: 1px solid rgba(108, 108, 227, 0.28);
+  color: #2d2e8f;
+}
+.credits-chip-balance { font-weight: 700; }
+.credits-chip-unit { opacity: 0.75; }
+.credits-chip-plan { opacity: 0.7; font-size: 12px; }
+
+.icon-text-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.credits-banner {
+  position: relative;
+  margin: 8px 24px 0 24px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.credits-banner .banner-dismiss {
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.6;
+}
+.credits-banner .banner-dismiss:hover { opacity: 1; }
+
+[data-theme='dark'] .credits-chip {
+  background: rgba(108, 108, 227, 0.18);
+  color: #c7c9ff;
+}
+
+/* ---- Mission row footer (launch / result) ---- */
+.mission-row {
+  display: grid;
+  gap: 8px;
+}
+.mission-row-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(15, 23, 42, 0.08);
+}
+.mission-cost-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(108, 108, 227, 0.10);
+  border: 1px solid rgba(108, 108, 227, 0.22);
+  color: #2d2e8f;
+  font-weight: 500;
+}
+.mission-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(108, 108, 227, 0.4);
+  background: rgba(108, 108, 227, 0.08);
+  color: #2d2e8f;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.mission-action-btn:hover:not(:disabled) {
+  background: rgba(108, 108, 227, 0.18);
+}
+.mission-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.mission-action-result {
+  background: rgba(64, 183, 122, 0.10);
+  border-color: rgba(64, 183, 122, 0.35);
+  color: #1d6b46;
+}
+.mission-action-result:hover:not(:disabled) {
+  background: rgba(64, 183, 122, 0.20);
+}
+.mission-action-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(34, 211, 238, 0.10);
+  border: 1px solid rgba(34, 211, 238, 0.30);
+  color: #0e7490;
+}
+
+[data-theme='dark'] .mission-cost-chip {
+  background: rgba(108, 108, 227, 0.18);
+  color: #c7c9ff;
+}
+[data-theme='dark'] .mission-action-btn {
+  background: rgba(108, 108, 227, 0.18);
+  color: #c7c9ff;
+}
+[data-theme='dark'] .mission-row-footer {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+/* ---- Mission result modal ---- */
+.mission-result-modal { max-width: 540px; }
+.mission-result-meta {
+  font-size: 13px;
+  opacity: 0.7;
+  margin-top: -4px;
+}
+.mission-result-section { margin-top: 16px; }
+.mission-result-section h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 6px 0;
+  opacity: 0.7;
+}
+.mission-result-section ol {
+  padding-left: 20px;
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+.mission-result-note {
+  margin-top: 16px;
+  font-size: 12px;
+  opacity: 0.6;
+  font-style: italic;
+}

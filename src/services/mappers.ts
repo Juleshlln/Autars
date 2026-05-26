@@ -51,20 +51,22 @@ function accentFromRole(role: string): string {
 
 // ---- mission status ----
 export function missionStatusFromDb(s: MissionDbStatus): Mission['status'] {
-  if (s === 'done') return 'terminee'
-  if (s === 'in_progress' || s === 'review') return 'en cours'
+  if (s === 'done' || s === 'completed') return 'terminee'
+  if (s === 'in_progress' || s === 'review' || s === 'waiting_user_decision') {
+    return 'en cours'
+  }
   return 'en attente'
 }
 export function missionStatusToDb(s: Mission['status']): MissionDbStatus {
-  if (s === 'terminee') return 'done'
+  if (s === 'terminee') return 'completed'
   if (s === 'en cours') return 'in_progress'
   return 'todo'
 }
 function progressFromStatus(s: MissionDbStatus): number {
-  if (s === 'done') return 100
-  if (s === 'review') return 80
+  if (s === 'done' || s === 'completed') return 100
+  if (s === 'review' || s === 'waiting_user_decision') return 80
   if (s === 'in_progress') return 45
-  if (s === 'blocked') return 20
+  if (s === 'blocked' || s === 'failed') return 20
   return 8
 }
 
@@ -166,5 +168,10 @@ export function missionRowToUi(row: MissionRow): Mission {
     status: missionStatusFromDb(row.status),
     progress: progressFromStatus(row.status),
     createdAt: row.created_at,
+    costCredits: row.cost_credits ?? 1,
+    orderIndex: row.order_index,
+    xpReward: row.xp_reward ?? 20,
+    type: row.type,
+    result: (row.result as Mission['result']) ?? null,
   }
 }

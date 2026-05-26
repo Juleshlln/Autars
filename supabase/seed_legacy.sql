@@ -1,12 +1,16 @@
 -- =====================================================================
--- Autars MVP - seed data
+-- LEGACY SEED - do NOT use for normal onboarding.
 -- =====================================================================
--- Replace YOUR_USER_ID_HERE with the auth.users.id of your test user.
--- You can find it in the Supabase dashboard: Authentication > Users.
+-- Normal onboarding is now driven by:
+--   * migrations/003_onboarding_triggers.sql  (profile + subscription + wallet)
+--   * services/workspacesService.ts           (workspace + agents + missions)
 --
--- Run with:
---   psql "$SUPABASE_DB_URL" -f supabase/seed.sql
--- or paste the file into the Supabase SQL editor.
+-- This file is kept only for debugging and one-off demos. It hard-codes
+-- a single user uuid and inserts data on its behalf — never run it on a
+-- real multi-user database.
+--
+-- Replace YOUR_USER_ID_HERE with an auth.users.id you control. Then:
+--   psql "$SUPABASE_DB_URL" -f supabase/seed_legacy.sql
 -- =====================================================================
 
 do $$

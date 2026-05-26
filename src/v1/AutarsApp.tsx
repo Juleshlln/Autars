@@ -105,7 +105,19 @@ function routeFromPath(pathname: string): Route {
 export default function AutarsApp() {
   const backend = useAutarsBackend()
   const { state } = backend
-  const { user, project, agents, missions, activity, mode, status, error } = state
+  const {
+    user,
+    project,
+    agents,
+    missions,
+    activity,
+    mode,
+    status,
+    error,
+    wallet,
+    plan,
+    creditError,
+  } = state
   const [route, setRoute] = useState<Route>(() => routeFromPath(window.location.pathname))
   const { theme, toggle } = useTheme()
 
@@ -254,9 +266,14 @@ export default function AutarsApp() {
               missions={missions}
               activity={activity}
               backendMode={mode}
+              wallet={wallet}
+              plan={plan}
+              creditError={creditError}
+              onClearCreditError={backend.clearCreditError}
               onToggleTheme={toggle}
               onLogout={logout}
               onCreateMission={createMission}
+              onRunMission={backend.runMission}
             />
           </motion.div>
         )}
@@ -935,9 +952,14 @@ function DashboardPage({
   missions,
   activity,
   backendMode,
+  wallet,
+  plan,
+  creditError,
+  onClearCreditError,
   onToggleTheme,
   onLogout,
   onCreateMission,
+  onRunMission,
 }: {
   userName: string
   theme: 'light' | 'dark'
@@ -946,9 +968,14 @@ function DashboardPage({
   missions: Mission[]
   activity: ActivityEvent[]
   backendMode: 'supabase' | 'local'
+  wallet: { balance: number; monthlyAllowance: number } | null
+  plan: { id: string; name: string; monthlyCredits: number } | null
+  creditError: string | null
+  onClearCreditError: () => void
   onToggleTheme: () => void
   onLogout: () => void
   onCreateMission: (payload: { agentId: string; title: string; description: string }) => void
+  onRunMission: (missionId: string) => Promise<void>
 }) {
   const [modal, setModal] = useState<{
     title: string
@@ -957,6 +984,9 @@ function DashboardPage({
     selectedAgentId: string
     missionDescription: string
   } | null>(null)
+
+  const [resultModalMissionId, setResultModalMissionId] = useState<string | null>(null)
+  const insufficientBalance = Boolean(wallet && wallet.balance <= 0)
 
   const monitorRef = useRef<HTMLDivElement>(null)
   const lastDeliveredRef = useRef(0)
@@ -1056,8 +1086,29 @@ function DashboardPage({
           <h1>{project.name}</h1>
         </div>
         <div className="dashboard-actions">
+          {wallet ? (
+            <div
+              className="credits-chip"
+              title={plan ? `Plan ${plan.name} · ${plan.monthlyCredits} crédits/mois` : 'Crédits restants'}
+            >
+              <WalletCards size={15} />
+              <span className="credits-chip-balance">{wallet.balance}</span>
+              <span className="credits-chip-unit">crédit{wallet.balance > 1 ? 's' : ''}</span>
+              {plan ? <span className="credits-chip-plan">· {plan.name}</span> : null}
+            </div>
+          ) : null}
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-          <button type="button" className="icon-text-button" onClick={() => openMissionModal(quickActions[0])}>
+          <button
+            type="button"
+            className="icon-text-button"
+            onClick={() => openMissionModal(quickActions[0])}
+            disabled={Boolean(wallet && wallet.balance <= 0)}
+            title={
+              wallet && wallet.balance <= 0
+                ? 'Crédits insuffisants pour lancer une nouvelle action.'
+                : undefined
+            }
+          >
             <Plus size={17} />
             Nouvelle action
           </button>
@@ -1067,6 +1118,21 @@ function DashboardPage({
           </button>
         </div>
       </header>
+
+      {creditError ? (
+        <div className="backend-banner backend-banner-error credits-banner" role="alert">
+          <strong>Crédits insuffisants</strong>
+          <span>{creditError}</span>
+          <button
+            type="button"
+            className="banner-dismiss"
+            onClick={onClearCreditError}
+            aria-label="Fermer"
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       <section className="dashboard-hero">
         <div className="project-brief">
@@ -1205,28 +1271,83 @@ function DashboardPage({
 
           <DashboardSection title="Missions en cours" subtitle="Les agents exécutent, vous gardez la validation.">
             <div className="mission-list">
-              {missions.map((mission) => {
-                const agent = liveAgents.find((item) => item.id === mission.agentId)
-                return (
-                  <article className="mission-row" key={mission.id}>
-                    <div className="mission-row-main">
-                      <div className="mini-icon">
-                        <KanbanSquare size={18} />
+              {[...missions]
+                .sort((a, b) => {
+                  const oa = a.orderIndex ?? 9999
+                  const ob = b.orderIndex ?? 9999
+                  if (oa !== ob) return oa - ob
+                  return a.createdAt.localeCompare(b.createdAt)
+                })
+                .map((mission) => {
+                  const agent = liveAgents.find((item) => item.id === mission.agentId)
+                  const cost = mission.costCredits ?? 1
+                  const isTodo = mission.status === 'en attente'
+                  const isDoing = mission.status === 'en cours'
+                  const isDone = mission.status === 'terminee'
+                  const cantLaunch = isTodo && wallet !== null && wallet.balance < cost
+                  return (
+                    <article className="mission-row" key={mission.id}>
+                      <div className="mission-row-main">
+                        <div className="mini-icon">
+                          <KanbanSquare size={18} />
+                        </div>
+                        <div>
+                          <h3>{mission.title}</h3>
+                          <p>
+                            {agent?.name ?? 'Agent'} · {mission.status} ·{' '}
+                            {formatDate(mission.createdAt)}
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h3>{mission.title}</h3>
-                        <p>{agent?.name ?? 'Agent'} · {mission.status} · {formatDate(mission.createdAt)}</p>
+                      <div className="mission-progress">
+                        <span>{mission.progress}%</span>
+                        <div className="progress-line">
+                          <span style={{ width: `${mission.progress}%` }} />
+                        </div>
                       </div>
-                    </div>
-                    <div className="mission-progress">
-                      <span>{mission.progress}%</span>
-                      <div className="progress-line">
-                        <span style={{ width: `${mission.progress}%` }} />
+                      <div className="mission-row-footer">
+                        <span className="mission-cost-chip" title="Coût en crédits">
+                          <WalletCards size={12} />
+                          {cost} crédit{cost > 1 ? 's' : ''}
+                        </span>
+                        {isTodo && (
+                          <button
+                            type="button"
+                            className="mission-action-btn mission-action-launch"
+                            disabled={cantLaunch}
+                            onClick={() => void onRunMission(mission.id)}
+                            title={
+                              cantLaunch
+                                ? 'Crédits insuffisants.'
+                                : "Faire travailler l'agent"
+                            }
+                          >
+                            <Play size={13} />
+                            Lancer
+                          </button>
+                        )}
+                        {isDoing && (
+                          <span className="mission-action-badge">
+                            <CircleDotDashed size={12} />
+                            En cours
+                          </span>
+                        )}
+                        {isDone && (
+                          <button
+                            type="button"
+                            className="mission-action-btn mission-action-result"
+                            onClick={() => setResultModalMissionId(mission.id)}
+                            disabled={!mission.result}
+                            title={mission.result ? 'Voir le résultat' : 'Résultat indisponible'}
+                          >
+                            <Check size={13} />
+                            Voir le résultat
+                          </button>
+                        )}
                       </div>
-                    </div>
-                  </article>
-                )
-              })}
+                    </article>
+                  )
+                })}
             </div>
           </DashboardSection>
 
@@ -1319,13 +1440,76 @@ function DashboardPage({
                 }
               />
             </label>
-            <button type="button" className="primary-cta auth-submit" onClick={launchMission}>
+            <button
+              type="button"
+              className="primary-cta auth-submit"
+              onClick={launchMission}
+              disabled={insufficientBalance}
+              title={insufficientBalance ? 'Crédits insuffisants.' : undefined}
+            >
               <Send size={17} />
               Lancer la mission
             </button>
           </div>
         </div>
       )}
+
+      {resultModalMissionId &&
+        (() => {
+          const mission = missions.find((m) => m.id === resultModalMissionId)
+          if (!mission) return null
+          const agent = liveAgents.find((a) => a.id === mission.agentId)
+          const result = mission.result
+          return (
+            <div
+              className="modal-backdrop"
+              role="presentation"
+              onClick={() => setResultModalMissionId(null)}
+            >
+              <div
+                className="mission-modal mission-result-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Résultat de mission"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="modal-head">
+                  <div>
+                    <span className="panel-kicker">Livrable agent</span>
+                    <h2>{mission.title}</h2>
+                  </div>
+                  <button type="button" onClick={() => setResultModalMissionId(null)}>
+                    Fermer
+                  </button>
+                </div>
+                <p className="mission-result-meta">
+                  {agent?.name ?? 'Agent'} · Statut : {mission.status}
+                </p>
+                {result?.summary ? (
+                  <section className="mission-result-section">
+                    <h3>Résumé</h3>
+                    <p>{result.summary}</p>
+                  </section>
+                ) : null}
+                {Array.isArray(result?.next_steps) && result!.next_steps!.length ? (
+                  <section className="mission-result-section">
+                    <h3>Prochaines étapes</h3>
+                    <ol>
+                      {result!.next_steps!.map((step, idx) => (
+                        <li key={idx}>{step}</li>
+                      ))}
+                    </ol>
+                  </section>
+                ) : null}
+                {result?.simulated ? (
+                  <p className="mission-result-note">
+                    Résultat généré par simulation. Sera remplacé par un vrai agent IA.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          )
+        })()}
     </main>
   )
 }

@@ -46,6 +46,13 @@ export interface Agent {
   createdAt: string
 }
 
+export interface MissionResult {
+  summary?: string
+  next_steps?: string[]
+  simulated?: boolean
+  [key: string]: unknown
+}
+
 export interface Mission {
   id: string
   projectId: string
@@ -55,6 +62,11 @@ export interface Mission {
   status: 'en cours' | 'en attente' | 'terminee'
   progress: number
   createdAt: string
+  costCredits: number
+  orderIndex: number | null
+  xpReward: number
+  type: string | null
+  result: MissionResult | null
 }
 
 export interface AppSnapshot {

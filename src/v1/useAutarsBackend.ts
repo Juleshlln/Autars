@@ -9,7 +9,13 @@ import {
   signUpWithPassword,
 } from '../services/authService'
 import { fetchAgents } from '../services/agentsService'
-import { createMission as supabaseCreateMission, fetchMissions } from '../services/missionsService'
+import {
+  createMission as supabaseCreateMission,
+  fetchMissions,
+  InsufficientCreditsError,
+  launchMission as supabaseLaunchMission,
+} from '../services/missionsService'
+import { scheduleSimulation } from '../services/missionSimulation'
 import {
   createWorkspaceWithDefaults,
   fetchWorkspaceForUser,
@@ -19,6 +25,14 @@ import {
   subscribeToActivity,
   type ActivityEvent,
 } from '../services/activityService'
+import {
+  fetchActiveSubscription,
+  fetchPlan,
+  fetchWallet,
+  type CreditWallet,
+  type Plan,
+  type Subscription,
+} from '../services/creditsService'
 import { defaultAgents } from './data'
 import {
   createLocalUser,
@@ -37,8 +51,12 @@ export interface BackendState {
   agents: Agent[]
   missions: Mission[]
   activity: ActivityEvent[]
+  wallet: CreditWallet | null
+  plan: Plan | null
+  subscription: Subscription | null
   status: 'idle' | 'loading' | 'ready' | 'error'
   error: string | null
+  creditError: string | null
 }
 
 export interface BackendApi {
@@ -53,6 +71,8 @@ export interface BackendApi {
     mainGoal: MainGoal
   }) => Promise<void>
   createMission: (payload: { agentId: string; title: string; description: string }) => Promise<void>
+  runMission: (missionId: string) => Promise<void>
+  clearCreditError: () => void
 }
 
 function emptyState(mode: BackendMode): BackendState {
@@ -63,8 +83,12 @@ function emptyState(mode: BackendMode): BackendState {
     agents: [],
     missions: [],
     activity: [],
+    wallet: null,
+    plan: null,
+    subscription: null,
     status: 'idle',
     error: null,
+    creditError: null,
   }
 }
 
@@ -74,14 +98,12 @@ export function useAutarsBackend(): BackendApi {
     if (mode === 'local') {
       const snap = loadSnapshot()
       return {
-        mode,
+        ...emptyState(mode),
         user: snap.user,
         project: snap.project,
         agents: snap.agents,
         missions: snap.missions,
-        activity: [],
         status: 'ready',
-        error: null,
       }
     }
     return { ...emptyState(mode), status: 'loading' }
@@ -112,11 +134,17 @@ export function useAutarsBackend(): BackendApi {
     return () => window.clearInterval(interval)
   }, [])
 
-  // ---- Supabase: bootstrap session + hydrate ----
+  // ---- Supabase: hydrate everything for a given user ----
   const hydrate = useCallback(async (user: AuthUser) => {
     setState((prev) => ({ ...prev, status: 'loading', error: null, user }))
     try {
-      const project = await fetchWorkspaceForUser(user.id)
+      const [project, wallet, subscription] = await Promise.all([
+        fetchWorkspaceForUser(user.id),
+        fetchWallet(user.id),
+        fetchActiveSubscription(user.id),
+      ])
+      const plan = subscription ? await fetchPlan(subscription.planId) : null
+
       if (!project) {
         setState((prev) => ({
           ...prev,
@@ -125,6 +153,9 @@ export function useAutarsBackend(): BackendApi {
           agents: [],
           missions: [],
           activity: [],
+          wallet,
+          plan,
+          subscription,
           status: 'ready',
         }))
         return
@@ -141,8 +172,12 @@ export function useAutarsBackend(): BackendApi {
         agents,
         missions,
         activity,
+        wallet,
+        plan,
+        subscription,
         status: 'ready',
         error: null,
+        creditError: null,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erreur de chargement Supabase.'
@@ -192,6 +227,49 @@ export function useAutarsBackend(): BackendApi {
     })
     return unsub
   }, [mode, projectId])
+
+  // ---- Supabase: realtime wallet balance ----
+  const userId = state.user?.id
+  useEffect(() => {
+    if (mode !== 'supabase' || !userId || !supabase) return
+    const channel = supabase
+      .channel(`wallet:${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'credit_wallets',
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload) => {
+          const row = payload.new as
+            | {
+                id: string
+                user_id: string
+                balance: number
+                monthly_allowance: number
+                last_refill_at: string | null
+              }
+            | null
+          if (!row) return
+          setState((prev) => ({
+            ...prev,
+            wallet: {
+              id: row.id,
+              userId: row.user_id,
+              balance: row.balance,
+              monthlyAllowance: row.monthly_allowance,
+              lastRefillAt: row.last_refill_at,
+            },
+          }))
+        },
+      )
+      .subscribe()
+    return () => {
+      void supabase?.removeChannel(channel)
+    }
+  }, [mode, userId])
 
   // ---- Seed-key -> real agent uuid translation ----
   const seedAgentLookup = useMemo(() => {
@@ -288,17 +366,56 @@ export function useAutarsBackend(): BackendApi {
     [mode, state.user, hydrate],
   )
 
-  // Used to avoid double-submitting create-mission in local mode.
+  // Avoid double-submitting create-mission in local mode.
   const seedingRef = useRef(false)
+
+  // Simulated agent completion. The actual logic lives in
+  // services/missionSimulation.ts so it can be moved server-side later
+  // without touching this hook.
+  const scheduleSimulatedCompletion = useCallback(
+    (mission: Mission, workspaceId: string, ownerId: string) => {
+      scheduleSimulation(
+        {
+          missionId: mission.id,
+          workspaceId,
+          ownerId,
+          agentId: mission.agentId || null,
+          title: mission.title,
+          type: mission.type,
+          xpReward: mission.xpReward,
+        },
+        ({ mission: updated, xp }) => {
+          setState((prev) => ({
+            ...prev,
+            missions: prev.missions.map((m) => (m.id === updated.id ? updated : m)),
+            agents: xp && xp.ok && mission.agentId
+              ? prev.agents.map((a) =>
+                  a.id === mission.agentId ? { ...a, status: 'actif' } : a,
+                )
+              : prev.agents,
+          }))
+          // Refresh agents to pick up the new xp/level from the RPC.
+          if (xp && xp.ok) {
+            void fetchAgents(workspaceId)
+              .then((agents) => setState((prev) => ({ ...prev, agents })))
+              .catch(() => {})
+          }
+        },
+      )
+    },
+    [],
+  )
 
   const createMission = useCallback(
     async (payload: { agentId: string; title: string; description: string }) => {
       const project = state.project
       const user = state.user
       if (!project || !user) return
+
       if (mode === 'supabase') {
         const realAgentId = seedAgentLookup.get(payload.agentId) ?? payload.agentId
-        const target = state.agents.find((a) => a.id === realAgentId) ?? state.agents[0]
+        const target =
+          state.agents.find((a) => a.id === realAgentId) ?? state.agents[0]
         try {
           const mission = await supabaseCreateMission({
             workspaceId: project.id,
@@ -306,21 +423,33 @@ export function useAutarsBackend(): BackendApi {
             agentId: target?.id ?? null,
             title: payload.title,
             description: payload.description,
+            costCredits: 1,
+            type: 'user_action',
           })
           setState((prev) => ({
             ...prev,
-            missions: [mission, ...prev.missions],
+            creditError: null,
+            missions: [mission, ...prev.missions.filter((m) => m.id !== mission.id)],
             agents: prev.agents.map((a) =>
               a.id === target?.id ? { ...a, status: 'travaille' } : a,
             ),
+            wallet: prev.wallet
+              ? { ...prev.wallet, balance: Math.max(0, prev.wallet.balance - 1) }
+              : prev.wallet,
           }))
+          scheduleSimulatedCompletion(mission, project.id, user.id)
         } catch (err) {
+          if (err instanceof InsufficientCreditsError) {
+            setState((prev) => ({ ...prev, creditError: err.message }))
+            return
+          }
           const message = err instanceof Error ? err.message : 'Création de mission impossible.'
           setState((prev) => ({ ...prev, error: message }))
           throw err
         }
         return
       }
+
       if (seedingRef.current) return
       const mission = createMissionPayload({
         projectId: project.id,
@@ -336,8 +465,68 @@ export function useAutarsBackend(): BackendApi {
         ),
       }))
     },
-    [mode, state.project, state.user, state.agents, seedAgentLookup],
+    [
+      mode,
+      state.project,
+      state.user,
+      state.agents,
+      seedAgentLookup,
+      scheduleSimulatedCompletion,
+    ],
   )
+
+  const runMission = useCallback(
+    async (missionId: string) => {
+      const project = state.project
+      const user = state.user
+      if (!project || !user) return
+      if (mode !== 'supabase') {
+        setState((prev) => ({
+          ...prev,
+          missions: prev.missions.map((m) =>
+            m.id === missionId ? { ...m, status: 'en cours' } : m,
+          ),
+        }))
+        return
+      }
+      const mission = state.missions.find((m) => m.id === missionId)
+      if (!mission) return
+      try {
+        const result = await supabaseLaunchMission({
+          missionId,
+          workspaceId: project.id,
+          ownerId: user.id,
+          agentId: mission.agentId || null,
+          cost: mission.costCredits,
+          title: mission.title,
+        })
+        setState((prev) => ({
+          ...prev,
+          creditError: null,
+          missions: prev.missions.map((m) => (m.id === missionId ? result.mission : m)),
+          agents: prev.agents.map((a) =>
+            a.id === mission.agentId ? { ...a, status: 'travaille' } : a,
+          ),
+          wallet: prev.wallet
+            ? { ...prev.wallet, balance: Math.max(0, prev.wallet.balance - 1) }
+            : prev.wallet,
+        }))
+        scheduleSimulatedCompletion(result.mission, project.id, user.id)
+      } catch (err) {
+        if (err instanceof InsufficientCreditsError) {
+          setState((prev) => ({ ...prev, creditError: err.message }))
+          return
+        }
+        const message = err instanceof Error ? err.message : 'Lancement de mission impossible.'
+        setState((prev) => ({ ...prev, error: message }))
+      }
+    },
+    [mode, state.project, state.user, state.missions, scheduleSimulatedCompletion],
+  )
+
+  const clearCreditError = useCallback(() => {
+    setState((prev) => ({ ...prev, creditError: null }))
+  }, [])
 
   return {
     state,
@@ -346,5 +535,7 @@ export function useAutarsBackend(): BackendApi {
     signOut,
     createWorkspace,
     createMission,
+    runMission,
+    clearCreditError,
   }
 }
