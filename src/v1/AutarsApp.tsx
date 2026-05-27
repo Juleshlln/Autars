@@ -60,7 +60,9 @@ import { useShallow } from 'zustand/react/shallow'
 import { defaultAgents, mainGoals, projectTypes, quickActions } from './data'
 import { useAutarsBackend } from './useAutarsBackend'
 import type { ActivityEvent } from '../services/activityService'
+import type { DeliverableRow } from '../services/deliverablesService'
 import { isSupabaseConfigured } from '../lib/supabaseClient'
+import { DeliverableViewModal } from './DeliverableViewModal'
 import {
   AgentsGamificationGrid,
   BusinessBadges,
@@ -111,6 +113,7 @@ export default function AutarsApp() {
     agents,
     missions,
     activity,
+    deliverables,
     mode,
     status,
     error,
@@ -148,7 +151,10 @@ export default function AutarsApp() {
   const signIn = async (email: string, password?: string) => {
     try {
       await backend.signIn(email, password)
-      navigate(project ? 'dashboard' : 'onboarding')
+      // Always navigate to dashboard. If hydrate found no project yet, the
+      // activeRoute fallback redirects to onboarding. This avoids a stale
+      // closure on `project` (which is null at first render).
+      navigate('dashboard')
     } catch {
       /* error surfaced through state.error */
     }
@@ -265,6 +271,7 @@ export default function AutarsApp() {
               agents={agents.length ? agents : hydrateAgents(project.id)}
               missions={missions}
               activity={activity}
+              deliverables={deliverables}
               backendMode={mode}
               wallet={wallet}
               plan={plan}
@@ -274,6 +281,10 @@ export default function AutarsApp() {
               onLogout={logout}
               onCreateMission={createMission}
               onRunMission={backend.runMission}
+              onValidateDeliverable={backend.validateDeliverable}
+              onRejectDeliverable={backend.rejectDeliverable}
+              onIterateDeliverable={backend.iterateDeliverable}
+              onConvertRecommendation={backend.convertRecommendation}
             />
           </motion.div>
         )}
@@ -951,6 +962,7 @@ function DashboardPage({
   agents,
   missions,
   activity,
+  deliverables,
   backendMode,
   wallet,
   plan,
@@ -960,6 +972,10 @@ function DashboardPage({
   onLogout,
   onCreateMission,
   onRunMission,
+  onValidateDeliverable,
+  onRejectDeliverable,
+  onIterateDeliverable,
+  onConvertRecommendation,
 }: {
   userName: string
   theme: 'light' | 'dark'
@@ -967,6 +983,7 @@ function DashboardPage({
   agents: Agent[]
   missions: Mission[]
   activity: ActivityEvent[]
+  deliverables: DeliverableRow[]
   backendMode: 'supabase' | 'local'
   wallet: { balance: number; monthlyAllowance: number } | null
   plan: { id: string; name: string; monthlyCredits: number } | null
@@ -976,7 +993,20 @@ function DashboardPage({
   onLogout: () => void
   onCreateMission: (payload: { agentId: string; title: string; description: string }) => void
   onRunMission: (missionId: string) => Promise<void>
+  onValidateDeliverable: (deliverableId: string, feedback?: string) => Promise<void>
+  onRejectDeliverable: (deliverableId: string, feedback?: string) => Promise<void>
+  onIterateDeliverable: (deliverableId: string, feedback: string) => Promise<void>
+  onConvertRecommendation: (deliverableId: string, recommendationIndex: number) => Promise<void>
 }) {
+  // Latest deliverable per mission (highest version wins).
+  const latestDeliverableByMission = useMemo(() => {
+    const map = new Map<string, DeliverableRow>()
+    for (const d of deliverables) {
+      const existing = map.get(d.missionId)
+      if (!existing || d.version > existing.version) map.set(d.missionId, d)
+    }
+    return map
+  }, [deliverables])
   const [modal, setModal] = useState<{
     title: string
     description: string
@@ -1086,17 +1116,27 @@ function DashboardPage({
           <h1>{project.name}</h1>
         </div>
         <div className="dashboard-actions">
-          {wallet ? (
-            <div
-              className="credits-chip"
-              title={plan ? `Plan ${plan.name} · ${plan.monthlyCredits} crédits/mois` : 'Crédits restants'}
-            >
-              <WalletCards size={15} />
-              <span className="credits-chip-balance">{wallet.balance}</span>
-              <span className="credits-chip-unit">crédit{wallet.balance > 1 ? 's' : ''}</span>
-              {plan ? <span className="credits-chip-plan">· {plan.name}</span> : null}
-            </div>
-          ) : null}
+          <div
+            className={`credits-chip credits-chip-prominent${
+              wallet && wallet.balance <= 0 ? ' credits-chip-empty' : ''
+            }`}
+            title={
+              wallet
+                ? plan
+                  ? `Plan ${plan.name} · ${plan.monthlyCredits} crédits/mois`
+                  : 'Crédits restants'
+                : 'Wallet en cours de chargement…'
+            }
+          >
+            <WalletCards size={16} />
+            <span className="credits-chip-balance">
+              {wallet ? wallet.balance : '—'}
+            </span>
+            <span className="credits-chip-unit">
+              crédit{wallet && wallet.balance > 1 ? 's' : ''}
+            </span>
+            {plan ? <span className="credits-chip-plan">· {plan.name}</span> : null}
+          </div>
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           <button
             type="button"
@@ -1284,6 +1324,11 @@ function DashboardPage({
                   const isTodo = mission.status === 'en attente'
                   const isDoing = mission.status === 'en cours'
                   const isDone = mission.status === 'terminee'
+                  const deliverable = latestDeliverableByMission.get(mission.id)
+                  const pendingDeliverable =
+                    deliverable &&
+                    (deliverable.status === 'pending_validation' ||
+                      deliverable.status === 'needs_improvement')
                   const cantLaunch = isTodo && wallet !== null && wallet.balance < cost
                   return (
                     <article className="mission-row" key={mission.id}>
@@ -1310,7 +1355,7 @@ function DashboardPage({
                           <WalletCards size={12} />
                           {cost} crédit{cost > 1 ? 's' : ''}
                         </span>
-                        {isTodo && (
+                        {isTodo && !pendingDeliverable && (
                           <button
                             type="button"
                             className="mission-action-btn mission-action-launch"
@@ -1326,19 +1371,33 @@ function DashboardPage({
                             Lancer
                           </button>
                         )}
-                        {isDoing && (
+                        {isDoing && !pendingDeliverable && (
                           <span className="mission-action-badge">
                             <CircleDotDashed size={12} />
-                            En cours
+                            Agent au travail
                           </span>
                         )}
-                        {isDone && (
+                        {pendingDeliverable && (
                           <button
                             type="button"
                             className="mission-action-btn mission-action-result"
                             onClick={() => setResultModalMissionId(mission.id)}
-                            disabled={!mission.result}
-                            title={mission.result ? 'Voir le résultat' : 'Résultat indisponible'}
+                          >
+                            <Check size={13} />
+                            Voir le livrable
+                          </button>
+                        )}
+                        {isDone && !pendingDeliverable && (
+                          <button
+                            type="button"
+                            className="mission-action-btn mission-action-result"
+                            onClick={() => setResultModalMissionId(mission.id)}
+                            disabled={!deliverable && !mission.result}
+                            title={
+                              deliverable || mission.result
+                                ? 'Voir le résultat'
+                                : 'Résultat indisponible'
+                            }
                           >
                             <Check size={13} />
                             Voir le résultat
@@ -1459,55 +1518,69 @@ function DashboardPage({
           const mission = missions.find((m) => m.id === resultModalMissionId)
           if (!mission) return null
           const agent = liveAgents.find((a) => a.id === mission.agentId)
-          const result = mission.result
-          return (
-            <div
-              className="modal-backdrop"
-              role="presentation"
-              onClick={() => setResultModalMissionId(null)}
-            >
+          const deliverable = latestDeliverableByMission.get(mission.id)
+          // No real deliverable yet (e.g. local mode or legacy mission.result):
+          // fall back to a minimal read-only view.
+          if (!deliverable) {
+            const result = mission.result
+            return (
               <div
-                className="mission-modal mission-result-modal"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Résultat de mission"
-                onClick={(event) => event.stopPropagation()}
+                className="modal-backdrop"
+                role="presentation"
+                onClick={() => setResultModalMissionId(null)}
               >
-                <div className="modal-head">
-                  <div>
-                    <span className="panel-kicker">Livrable agent</span>
-                    <h2>{mission.title}</h2>
+                <div
+                  className="mission-modal mission-result-modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Résultat de mission"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="modal-head">
+                    <div>
+                      <span className="panel-kicker">Livrable agent</span>
+                      <h2>{mission.title}</h2>
+                    </div>
+                    <button type="button" onClick={() => setResultModalMissionId(null)}>
+                      Fermer
+                    </button>
                   </div>
-                  <button type="button" onClick={() => setResultModalMissionId(null)}>
-                    Fermer
-                  </button>
-                </div>
-                <p className="mission-result-meta">
-                  {agent?.name ?? 'Agent'} · Statut : {mission.status}
-                </p>
-                {result?.summary ? (
-                  <section className="mission-result-section">
-                    <h3>Résumé</h3>
-                    <p>{result.summary}</p>
-                  </section>
-                ) : null}
-                {Array.isArray(result?.next_steps) && result!.next_steps!.length ? (
-                  <section className="mission-result-section">
-                    <h3>Prochaines étapes</h3>
-                    <ol>
-                      {result!.next_steps!.map((step, idx) => (
-                        <li key={idx}>{step}</li>
-                      ))}
-                    </ol>
-                  </section>
-                ) : null}
-                {result?.simulated ? (
-                  <p className="mission-result-note">
-                    Résultat généré par simulation. Sera remplacé par un vrai agent IA.
+                  <p className="mission-result-meta">
+                    {agent?.name ?? 'Agent'} · Statut : {mission.status}
                   </p>
-                ) : null}
+                  {result?.summary ? (
+                    <section className="mission-result-section">
+                      <h3>Résumé</h3>
+                      <p>{result.summary}</p>
+                    </section>
+                  ) : null}
+                  {Array.isArray(result?.next_steps) && result!.next_steps!.length ? (
+                    <section className="mission-result-section">
+                      <h3>Prochaines étapes</h3>
+                      <ol>
+                        {result!.next_steps!.map((step, idx) => (
+                          <li key={idx}>{step}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  ) : null}
+                </div>
               </div>
-            </div>
+            )
+          }
+          return (
+            <DeliverableViewModal
+              deliverable={deliverable}
+              missionTitle={mission.title}
+              agentName={agent?.name ?? 'Agent'}
+              onClose={() => setResultModalMissionId(null)}
+              onValidate={() => onValidateDeliverable(deliverable.id)}
+              onReject={(feedback) => onRejectDeliverable(deliverable.id, feedback)}
+              onIterate={(feedback) => onIterateDeliverable(deliverable.id, feedback)}
+              onConvertRecommendation={(index) =>
+                onConvertRecommendation(deliverable.id, index)
+              }
+            />
           )
         })()}
     </main>

@@ -35,10 +35,9 @@ export async function fetchMissions(workspaceId: string): Promise<Mission[]> {
 }
 
 /**
- * Create AND start a mission. Inserts the mission as `todo`, then atomically
- * consumes credits via the RPC. If credits are insufficient, the mission stays
- * `blocked`, a `credits_insufficient` event is logged, and an
- * `InsufficientCreditsError` is thrown.
+ * Insert a new mission as `todo`. Does NOT consume credits and does NOT run
+ * the agent — the caller is expected to trigger /api/agents/run separately
+ * (via agentRunService.startAgentRun) to launch it for real.
  */
 export async function createMission(payload: {
   workspaceId: string
@@ -80,15 +79,7 @@ export async function createMission(payload: {
     metadata: { cost_credits: cost },
   })
 
-  const launched = await launchMission({
-    missionId: row.id,
-    workspaceId: payload.workspaceId,
-    ownerId: payload.ownerId,
-    agentId: payload.agentId,
-    cost,
-    title: payload.title,
-  })
-  return launched.mission
+  return missionRowToUi(row)
 }
 
 /**

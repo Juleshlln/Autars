@@ -105,7 +105,7 @@ export async function handleBrief(req: IncomingMessage, res: ServerResponse) {
   writeSseHeaders(res)
   try {
     const stream = client.messages.stream({
-      model: 'claude-opus-4-7',
+      model: 'claude-sonnet-4-5',
       max_tokens: config.maxBriefTokens,
       system: `${config.briefSystem}
 
@@ -169,7 +169,7 @@ export async function handleMission(req: IncomingMessage, res: ServerResponse) {
 
   try {
     const stream = client.messages.stream({
-      model: 'claude-opus-4-7',
+      model: 'claude-sonnet-4-5',
       max_tokens: config.maxMissionTokens,
       thinking: { type: 'adaptive' },
       output_config: { effort: 'medium' },

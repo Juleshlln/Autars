@@ -3401,6 +3401,31 @@ button.gam-skin-card { font-family: inherit; }
 .credits-chip-unit { opacity: 0.75; }
 .credits-chip-plan { opacity: 0.7; font-size: 12px; }
 
+/* Prominent variant — always visible, clearly readable */
+.credits-chip-prominent {
+  padding: 8px 14px;
+  font-size: 14px;
+  background: linear-gradient(120deg, rgba(108, 108, 227, 0.16), rgba(34, 211, 238, 0.16));
+  border: 1px solid rgba(108, 108, 227, 0.45);
+  box-shadow: 0 4px 12px -6px rgba(108, 108, 227, 0.3);
+}
+.credits-chip-prominent .credits-chip-balance {
+  font-size: 18px;
+  letter-spacing: 0.01em;
+}
+.credits-chip-empty {
+  background: linear-gradient(120deg, rgba(229, 68, 68, 0.18), rgba(245, 158, 11, 0.18));
+  border-color: rgba(229, 68, 68, 0.5);
+  color: #9a1f1f;
+}
+[data-theme='dark'] .credits-chip-empty {
+  color: #ffb4b4;
+}
+[data-theme='dark'] .credits-chip-prominent {
+  background: linear-gradient(120deg, rgba(108, 108, 227, 0.28), rgba(34, 211, 238, 0.22));
+  border-color: rgba(108, 108, 227, 0.6);
+}
+
 .icon-text-button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -3537,3 +3562,141 @@ button.gam-skin-card { font-family: inherit; }
   opacity: 0.6;
   font-style: italic;
 }
+
+/* ---- Deliverable view modal ---- */
+.deliverable-modal {
+  max-width: 720px;
+  width: 100%;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+.deliverable-meta {
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 4px 0 0 0;
+}
+.deliverable-body {
+  overflow-y: auto;
+  padding-right: 4px;
+  display: grid;
+  gap: 18px;
+  margin: 16px 0;
+}
+.deliverable-section h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 6px 0;
+  opacity: 0.7;
+}
+.deliverable-section p {
+  margin: 0;
+  line-height: 1.55;
+}
+.deliverable-list {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+.deliverable-markdown { font-size: 14px; }
+.deliverable-h1 {
+  font-size: 17px;
+  margin: 0;
+}
+.deliverable-h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+  margin: 12px 0 4px 0;
+}
+.deliverable-paragraph { margin: 0; line-height: 1.5; }
+.deliverable-recommendation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.deliverable-recommendation {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(108, 108, 227, 0.08);
+}
+.deliverable-recommendation > div { display: grid; gap: 4px; }
+.deliverable-recommendation strong { font-size: 14px; }
+.deliverable-recommendation p {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.8;
+}
+.reco-tags {
+  display: inline-flex;
+  gap: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.reco-tags em {
+  font-style: normal;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+}
+.reco-priority.reco-high { background: rgba(229, 68, 68, 0.18); color: #b91c1c; }
+.reco-priority.reco-medium { background: rgba(245, 158, 11, 0.18); color: #92400e; }
+.reco-priority.reco-low { background: rgba(96, 165, 250, 0.18); color: #1d4ed8; }
+.deliverable-footer {
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  padding-top: 14px;
+  margin-top: 4px;
+}
+.deliverable-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.deliverable-iterate-row {
+  display: grid;
+  gap: 8px;
+}
+.deliverable-iterate-row textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: transparent;
+  color: inherit;
+}
+.deliverable-iterate-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.deliverable-footer-locked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  opacity: 0.85;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+[data-theme='dark'] .deliverable-recommendation {
+  background: rgba(108, 108, 227, 0.16);
+}
+[data-theme='dark'] .deliverable-footer {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+[data-theme='dark'] .reco-tags em { background: rgba(255, 255, 255, 0.08); }
