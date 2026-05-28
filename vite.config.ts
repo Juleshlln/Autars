@@ -10,6 +10,9 @@ import {
 import { hasAdmin } from './server/supabaseAdmin'
 
 interface ServerEnv {
+  LLM_BASE_URL?: string
+  LLM_API_KEY?: string
+  LLM_MODEL?: string
   ANTHROPIC_API_KEY?: string
   SUPABASE_URL?: string
   SUPABASE_SERVICE_ROLE_KEY?: string
@@ -20,6 +23,9 @@ interface ServerEnv {
 
 function applyServerEnv(env: ServerEnv) {
   const passthrough: (keyof ServerEnv)[] = [
+    'LLM_BASE_URL',
+    'LLM_API_KEY',
+    'LLM_MODEL',
     'ANTHROPIC_API_KEY',
     'SUPABASE_URL',
     'SUPABASE_SERVICE_ROLE_KEY',
@@ -52,7 +58,11 @@ function llmProxyPlugin(env: ServerEnv): PluginOption {
           res.setHeader('Content-Type', 'application/json')
           res.end(
             JSON.stringify({
-              hasKey: Boolean(process.env.ANTHROPIC_API_KEY),
+              hasKey: Boolean(
+                process.env.LLM_API_KEY ?? process.env.ANTHROPIC_API_KEY,
+              ),
+              llmBaseUrl: process.env.LLM_BASE_URL ?? null,
+              llmModel: process.env.LLM_MODEL ?? null,
               hasSupabaseAdmin: hasAdmin(),
             }),
           )

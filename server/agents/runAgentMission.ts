@@ -1,14 +1,29 @@
 // =====================================================================
-// Agent orchestrator
+// Agent orchestrator — ReAct loop (plan → act → synthesize)
 // =====================================================================
-// Single entry point used by HTTP handlers. Calls Anthropic with the
-// resolved AgentMissionDefinition, parses JSON output strictly (with one
-// retry), returns a normalized AgentExecutionResult.
+// Every mission runs through three sequential LLM phases. Each phase
+// emits a progress event through the `onProgress` callback so the
+// orchestrator can stream activity_events to the frontend's
+// ActivityConsole in (near-)real-time.
 //
-// This module is server-side only. It must NOT be imported from /src.
+//   1. PLAN      — short reasoning trace: what the agent sees, what it
+//                  will do. Cheap call, ~300 tokens. Logged verbatim.
+//   2. ACT       — main generation call. For JSON missions, output is a
+//                  validated object. For markdown missions, output is a
+//                  markdown body followed by a strict JSON metadata
+//                  block parsed by zod.
+//   3. SYNTHESIZE — local: validation + extraction of next-mission
+//                   recommendations, context_updates, memory_items.
+//
+// This module never throws across the boundary. Every error path returns
+// AgentExecutionResult with `ok:false` and a human-readable `error` so
+// the caller can flip the mission state to `failed` cleanly.
+//
+// All LLM I/O goes through `server/llmClient.ts` (OpenAI-compatible) so
+// the same code runs against Claude, GPT, or a local Ollama model by
+// changing env vars only.
 // =====================================================================
 
-import Anthropic from '@anthropic-ai/sdk'
 import type {
   AgentMissionDefinition,
   AgentRunContext,
@@ -16,56 +31,47 @@ import type {
   RecommendedNextMission,
   ScanReportOutput,
 } from './types'
+import { getLLM, getLLMConfig } from '../llmClient'
+import {
+  AgentMetadataSchema,
+  ClarifyBusinessIdeaOutputSchema,
+  formatZodError,
+} from './schemas'
+
+export type AgentPhase = 'plan' | 'act' | 'synthesize'
+
+export interface AgentProgressEvent {
+  phase: AgentPhase
+  title: string
+  description: string | null
+}
+
+export type ProgressCallback = (event: AgentProgressEvent) => Promise<void>
 
 export interface AgentExecutionResult {
   ok: boolean
   outputFormat: 'json' | 'markdown'
   title: string
   summary: string
-  // For JSON missions: the parsed structured object.
-  // For markdown missions: a small structured envelope with markdown body.
   structured: Record<string, unknown>
-  // Plain-text content for storage/search. For json it's a pretty-printed
-  // JSON; for markdown it's the raw markdown.
   content: string
   recommendedNextMissions: RecommendedNextMission[]
   contextUpdates: ClarifyBusinessIdeaOutput['context_updates']
   memoryItems: ClarifyBusinessIdeaOutput['memory_items']
   model: string
-  tokenUsage: {
-    input: number
-    output: number
-  } | null
+  tokenUsage: { input: number; output: number } | null
+  // Sequence of phase events, returned for debug/logging.
+  phases: AgentProgressEvent[]
   error?: string
 }
 
-function getClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY missing on server')
-  return new Anthropic({ apiKey })
-}
-
-interface AnthropicTextContent {
-  type: 'text'
-  text: string
-}
-
-function extractTextFromMessage(message: Anthropic.Message): string {
-  const parts: string[] = []
-  for (const block of message.content) {
-    if (block.type === 'text') {
-      parts.push((block as AnthropicTextContent).text)
-    }
-  }
-  return parts.join('\n').trim()
-}
-
+// ---------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------
 function stripJsonFences(raw: string): string {
   const trimmed = raw.trim()
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
   if (fenced) return fenced[1].trim()
-  // Sometimes the model wraps in `{ ... }` after a brief preamble. Extract
-  // the first balanced {...} block.
   const start = trimmed.indexOf('{')
   const end = trimmed.lastIndexOf('}')
   if (start >= 0 && end > start) return trimmed.slice(start, end + 1)
@@ -76,21 +82,40 @@ function tryParseJson(raw: string): unknown {
   return JSON.parse(stripJsonFences(raw))
 }
 
-function extractNextMissionsFromMarkdown(markdown: string): RecommendedNextMission[] {
-  const marker = markdown.match(
-    /<!--\s*AUTARS_NEXT_MISSIONS\s*:\s*(\[[\s\S]*?\])\s*-->/i,
-  )
-  if (!marker) return []
-  try {
-    const parsed = JSON.parse(marker[1]) as RecommendedNextMission[]
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (m) =>
-        m &&
-        typeof m.title === 'string' &&
-        typeof m.description === 'string' &&
-        typeof m.agent_role === 'string',
+function extractMetadataBlock(markdown: string): {
+  cleaned: string
+  metadataRaw: string | null
+} {
+  const re = /<!--\s*AUTARS_METADATA\s*:\s*(\{[\s\S]*?\})\s*-->/i
+  const match = markdown.match(re)
+  if (!match) {
+    // Backward-compat: older prompt used AUTARS_NEXT_MISSIONS array.
+    const legacy = markdown.match(
+      /<!--\s*AUTARS_NEXT_MISSIONS\s*:\s*(\[[\s\S]*?\])\s*-->/i,
     )
+    if (legacy) {
+      const legacyMeta = JSON.stringify({
+        summary: '',
+        recommended_next_missions: safeJsonArray(legacy[1]),
+        memory_items: [],
+      })
+      return {
+        cleaned: markdown
+          .replace(/<!--\s*AUTARS_NEXT_MISSIONS\s*:[\s\S]*?-->/i, '')
+          .trim(),
+        metadataRaw: legacyMeta,
+      }
+    }
+    return { cleaned: markdown.trim(), metadataRaw: null }
+  }
+  const cleaned = markdown.replace(re, '').trim()
+  return { cleaned, metadataRaw: match[1] }
+}
+
+function safeJsonArray(raw: string): unknown[] {
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
   } catch {
     return []
   }
@@ -105,171 +130,437 @@ function deriveMarkdownSummary(markdown: string, fallback: string): string {
   const tldr = markdown.match(/##\s*TL;DR\s*\n+([\s\S]*?)(?:\n##|$)/i)
   const snippet = tldr?.[1]?.trim()
   if (snippet) return snippet.split('\n').slice(0, 3).join(' ').trim()
-  // First non-heading paragraph.
-  const lines = markdown.split('\n')
-  for (const line of lines) {
+  for (const line of markdown.split('\n')) {
     const trimmed = line.trim()
     if (trimmed && !trimmed.startsWith('#')) return trimmed.slice(0, 280)
   }
   return fallback
 }
 
-async function callAnthropicJson(
+interface CompletionUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+}
+
+function usageToTokens(
+  usage: CompletionUsage | undefined,
+): { input: number; output: number } | null {
+  if (!usage) return null
+  return {
+    input: usage.prompt_tokens ?? 0,
+    output: usage.completion_tokens ?? 0,
+  }
+}
+
+async function emitProgress(
+  cb: ProgressCallback | undefined,
+  events: AgentProgressEvent[],
+  evt: AgentProgressEvent,
+): Promise<void> {
+  events.push(evt)
+  if (!cb) return
+  try {
+    await cb(evt)
+  } catch {
+    // Progress logging failures must never break the run.
+  }
+}
+
+// ---------------------------------------------------------------------
+// Phase 1 — planning
+// ---------------------------------------------------------------------
+const PLANNER_SYSTEM = `Tu es un agent IA d'Autars en phase de PLANIFICATION.
+Tu reçois le contexte de la mission. Tu écris en 3 à 6 phrases courtes :
+1. Ce que tu as compris du contexte (sans répéter mot pour mot).
+2. Les éléments manquants ou hypothèses risquées.
+3. Les étapes que tu vas suivre pour produire le livrable.
+Ton : direct, opérationnel. Pas de salutations. Pas d'emoji. Pas de markdown.`
+
+function buildPlannerUserPrompt(
   def: AgentMissionDefinition,
   ctx: AgentRunContext,
-  client: Anthropic,
-  attempt: number,
-): Promise<{ raw: string; usage: Anthropic.Message['usage']; model: string }> {
-  const userPrompt = def.buildUserPrompt(ctx)
-  // Pre-fill the assistant turn with `{` to coerce JSON-shaped output.
-  const message = await client.messages.create({
-    model: def.model,
-    max_tokens: def.maxTokens,
-    system: def.systemPrompt,
+): string {
+  const ctxLines: string[] = []
+  ctxLines.push(`Mission : ${ctx.missionTitle} (type: ${def.missionType})`)
+  if (ctx.missionDescription) ctxLines.push(`Description : ${ctx.missionDescription}`)
+  ctxLines.push(`Filiale : ${ctx.workspace.name}`)
+  if (ctx.workspace.description) ctxLines.push(`Pitch : ${ctx.workspace.description}`)
+  if (ctx.context.business_idea) ctxLines.push(`Idée : ${ctx.context.business_idea}`)
+  if (ctx.context.target_customer)
+    ctxLines.push(`Cible : ${ctx.context.target_customer}`)
+  if (ctx.context.market) ctxLines.push(`Marché : ${ctx.context.market}`)
+  if (ctx.context.constraints)
+    ctxLines.push(`Contraintes : ${ctx.context.constraints}`)
+  if (ctx.previousDeliverables.length > 0) {
+    ctxLines.push(
+      `Livrables validés disponibles : ${ctx.previousDeliverables
+        .slice(0, 5)
+        .map((d) => d.mission_title)
+        .join(', ')}`,
+    )
+  }
+  if (ctx.iterationFeedback)
+    ctxLines.push(`Feedback à intégrer : ${ctx.iterationFeedback}`)
+  return `${ctxLines.join('\n')}\n\nDécris ton plan en 3 à 6 phrases.`
+}
+
+async function planPhase(
+  def: AgentMissionDefinition,
+  ctx: AgentRunContext,
+): Promise<{ plan: string; model: string; usage: CompletionUsage | undefined }> {
+  const client = getLLM()
+  const cfg = getLLMConfig()
+  const completion = await client.chat.completions.create({
+    model: cfg.model,
+    max_tokens: 400,
+    temperature: 0.2,
     messages: [
-      { role: 'user', content: userPrompt },
-      { role: 'assistant', content: '{' },
+      { role: 'system', content: PLANNER_SYSTEM },
+      { role: 'user', content: buildPlannerUserPrompt(def, ctx) },
     ],
   })
-  let text = extractTextFromMessage(message)
-  // The prefill `{` is NOT echoed back in `message.content`, so we re-add it.
-  if (!text.startsWith('{')) text = `{${text}`
-  if (attempt === 0) {
-    return { raw: text, usage: message.usage, model: message.model }
-  }
-  return { raw: text, usage: message.usage, model: message.model }
+  const text = completion.choices[0]?.message?.content?.trim() ?? ''
+  return { plan: text, model: completion.model, usage: completion.usage }
 }
 
-async function callAnthropicMarkdown(
+// ---------------------------------------------------------------------
+// Phase 2 — action
+// ---------------------------------------------------------------------
+const MARKDOWN_METADATA_SUFFIX = `
+
+À la toute fin du document, ajoute un bloc HTML invisible contenant un JSON valide. Ce bloc N'EST PAS rendu à l'utilisateur ; il sert au système.
+
+Format EXACT, sans rien d'autre après :
+<!--AUTARS_METADATA:{"summary":"<résumé 2 phrases>","recommended_next_missions":[{"title":"...","description":"...","agent_role":"strategist|builder|growth|finance","mission_type":"scan|positioning|segment|value-prop|offer|landing|acquisition|brand-kit|clarify-business-idea","priority":"high|medium|low"}],"memory_items":[{"memory_type":"fact|preference|constraint|validated_decision|rejected_idea","content":"..."}],"context_updates":{"business_idea":"...","target_customer":"..."}}-->
+
+Règles du bloc :
+- JSON STRICTEMENT VALIDE. Pas de commentaires, pas de trailing comma.
+- recommended_next_missions : 2 à 4 entrées. Choisis des mission_type pertinents.
+- memory_items : 0 à 5 entrées factuelles à mémoriser pour les prochaines missions.
+- context_updates : ne mets que les champs effectivement enrichis par ton livrable.`
+
+async function actPhase(
   def: AgentMissionDefinition,
   ctx: AgentRunContext,
-  client: Anthropic,
-): Promise<{ raw: string; usage: Anthropic.Message['usage']; model: string }> {
-  const userPrompt = def.buildUserPrompt(ctx)
-  const tools: Array<{ type: string; name: string }> = []
-  if (def.enableWebSearch) tools.push({ type: 'web_search_20260209', name: 'web_search' })
-  if (def.enableWebFetch) tools.push({ type: 'web_fetch_20260209', name: 'web_fetch' })
+  planText: string,
+): Promise<{ raw: string; model: string; usage: CompletionUsage | undefined }> {
+  const client = getLLM()
+  const cfg = getLLMConfig()
+  const baseUserPrompt = def.buildUserPrompt(ctx)
+  const userPrompt = planText
+    ? `${baseUserPrompt}\n\nPlan annoncé :\n${planText}\n\nProduis maintenant le livrable demandé en respectant ce plan.`
+    : baseUserPrompt
 
-  const params = {
-    model: def.model,
-    max_tokens: def.maxTokens,
-    system: def.systemPrompt,
-    messages: [{ role: 'user' as const, content: userPrompt }],
-    ...(tools.length > 0 ? { tools } : {}),
+  if (def.outputFormat === 'json') {
+    const completion = await client.chat.completions.create({
+      model: cfg.model,
+      max_tokens: def.maxTokens,
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: def.systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    })
+    return {
+      raw: completion.choices[0]?.message?.content ?? '',
+      model: completion.model,
+      usage: completion.usage,
+    }
   }
-  const message = (await client.messages.create(
-    params as Parameters<typeof client.messages.create>[0],
-  )) as Anthropic.Message
-  return { raw: extractTextFromMessage(message), usage: message.usage, model: message.model }
+
+  const completion = await client.chat.completions.create({
+    model: cfg.model,
+    max_tokens: def.maxTokens,
+    temperature: 0.4,
+    messages: [
+      {
+        role: 'system',
+        content: `${def.systemPrompt}\n${MARKDOWN_METADATA_SUFFIX}`,
+      },
+      { role: 'user', content: userPrompt },
+    ],
+  })
+  return {
+    raw: completion.choices[0]?.message?.content ?? '',
+    model: completion.model,
+    usage: completion.usage,
+  }
 }
 
+// ---------------------------------------------------------------------
+// Phase 3 — synthesize (local, no LLM)
+// ---------------------------------------------------------------------
+function synthesizeJson(
+  raw: string,
+  def: AgentMissionDefinition,
+): { ok: true; data: ClarifyBusinessIdeaOutput } | { ok: false; error: string } {
+  let parsed: unknown
+  try {
+    parsed = tryParseJson(raw)
+  } catch (err) {
+    return {
+      ok: false,
+      error: `json_parse_failed: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+  if (def.missionType === 'clarify-business-idea') {
+    const result = ClarifyBusinessIdeaOutputSchema.safeParse(parsed)
+    if (!result.success) {
+      return { ok: false, error: `schema_invalid: ${formatZodError(result.error)}` }
+    }
+    return { ok: true, data: result.data as ClarifyBusinessIdeaOutput }
+  }
+  // Other JSON mission types: shallow shape check then trust.
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, error: 'output_not_object' }
+  }
+  return { ok: true, data: parsed as ClarifyBusinessIdeaOutput }
+}
+
+function synthesizeMarkdown(
+  raw: string,
+  ctx: AgentRunContext,
+):
+  | {
+      ok: true
+      markdown: string
+      title: string
+      summary: string
+      recommendedNextMissions: RecommendedNextMission[]
+      memoryItems: ClarifyBusinessIdeaOutput['memory_items']
+      contextUpdates: ClarifyBusinessIdeaOutput['context_updates']
+    }
+  | { ok: false; error: string } {
+  const { cleaned, metadataRaw } = extractMetadataBlock(raw)
+  const title = deriveMarkdownTitle(cleaned, ctx.missionTitle)
+  let summary = deriveMarkdownSummary(cleaned, '')
+  let recommendedNextMissions: RecommendedNextMission[] = []
+  let memoryItems: ClarifyBusinessIdeaOutput['memory_items'] = []
+  let contextUpdates: ClarifyBusinessIdeaOutput['context_updates']
+
+  if (metadataRaw) {
+    try {
+      const parsed = JSON.parse(metadataRaw)
+      const result = AgentMetadataSchema.safeParse(parsed)
+      if (result.success) {
+        if (result.data.summary) summary = result.data.summary
+        recommendedNextMissions = result.data.recommended_next_missions
+        memoryItems = result.data.memory_items
+        contextUpdates = result.data.context_updates
+      } else {
+        // Metadata invalid but body still useful — log and continue with empty extras.
+        recommendedNextMissions = []
+      }
+    } catch {
+      recommendedNextMissions = []
+    }
+  }
+
+  return {
+    ok: true,
+    markdown: cleaned,
+    title,
+    summary,
+    recommendedNextMissions,
+    memoryItems,
+    contextUpdates,
+  }
+}
+
+// ---------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------
 export async function runAgentMission(
   def: AgentMissionDefinition,
   ctx: AgentRunContext,
+  onProgress?: ProgressCallback,
 ): Promise<AgentExecutionResult> {
-  const client = getClient()
-
-  if (def.outputFormat === 'json') {
-    let lastError = ''
-    let lastRaw = ''
-    let lastUsage: Anthropic.Message['usage'] | null = null
-    let lastModel = def.model
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const { raw, usage, model } = await callAnthropicJson(def, ctx, client, attempt)
-        lastRaw = raw
-        lastUsage = usage
-        lastModel = model
-        const parsed = tryParseJson(raw)
-        const validation = def.validateOutput ? def.validateOutput(parsed) : null
-        if (validation) {
-          lastError = `output_validation_failed: ${validation}`
-          continue
-        }
-        const structured = parsed as ClarifyBusinessIdeaOutput
-        return {
-          ok: true,
-          outputFormat: 'json',
-          title: structured.title,
-          summary: structured.summary,
-          structured: structured as unknown as Record<string, unknown>,
-          content: JSON.stringify(structured, null, 2),
-          recommendedNextMissions: Array.isArray(structured.recommended_next_missions)
-            ? structured.recommended_next_missions
-            : [],
-          contextUpdates: structured.context_updates,
-          memoryItems: structured.memory_items,
-          model: lastModel,
-          tokenUsage: lastUsage
-            ? { input: lastUsage.input_tokens ?? 0, output: lastUsage.output_tokens ?? 0 }
-            : null,
-        }
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err)
+  const phases: AgentProgressEvent[] = []
+  let model = def.model
+  let aggregateUsage: { input: number; output: number } = { input: 0, output: 0 }
+  const addUsage = (u: CompletionUsage | undefined) => {
+    const t = usageToTokens(u)
+    if (t) {
+      aggregateUsage = {
+        input: aggregateUsage.input + t.input,
+        output: aggregateUsage.output + t.output,
       }
-    }
-    return {
-      ok: false,
-      outputFormat: 'json',
-      title: 'Échec agent',
-      summary: lastError || 'Agent execution failed',
-      structured: { raw: lastRaw, error: lastError },
-      content: lastRaw,
-      recommendedNextMissions: [],
-      contextUpdates: undefined,
-      memoryItems: undefined,
-      model: lastModel,
-      tokenUsage: lastUsage
-        ? { input: lastUsage.input_tokens ?? 0, output: lastUsage.output_tokens ?? 0 }
-        : null,
-      error: lastError,
     }
   }
 
-  // Markdown path (scan, brand-kit, etc.)
+  await emitProgress(onProgress, phases, {
+    phase: 'plan',
+    title: 'Analyse du contexte',
+    description: 'Lecture du brief, du contexte du QG et des livrables précédents.',
+  })
+
+  // ---- Phase 1: PLAN ------------------------------------------------
+  let planText: string
   try {
-    const { raw, usage, model } = await callAnthropicMarkdown(def, ctx, client)
-    const title = deriveMarkdownTitle(raw, ctx.missionTitle)
-    const summary = deriveMarkdownSummary(raw, '')
-    const nextMissions = extractNextMissionsFromMarkdown(raw)
-    // Strip the AUTARS_NEXT_MISSIONS marker from the rendered markdown.
-    const cleaned = raw.replace(/<!--\s*AUTARS_NEXT_MISSIONS\s*:[\s\S]*?-->/i, '').trim()
-    const structured: ScanReportOutput = {
-      title,
-      summary,
-      markdown: cleaned,
-      recommended_next_missions: nextMissions,
-    }
-    return {
-      ok: true,
-      outputFormat: 'markdown',
-      title,
-      summary,
-      structured: structured as unknown as Record<string, unknown>,
-      content: cleaned,
-      recommendedNextMissions: nextMissions,
-      contextUpdates: undefined,
-      memoryItems: undefined,
-      model,
-      tokenUsage: usage
-        ? { input: usage.input_tokens ?? 0, output: usage.output_tokens ?? 0 }
-        : null,
-    }
+    const planResult = await planPhase(def, ctx)
+    model = planResult.model || model
+    addUsage(planResult.usage)
+    planText = planResult.plan
+    await emitProgress(onProgress, phases, {
+      phase: 'plan',
+      title: 'Plan annoncé',
+      description: planText ? planText.slice(0, 500) : null,
+    })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    return {
-      ok: false,
-      outputFormat: 'markdown',
-      title: 'Échec agent',
-      summary: message,
-      structured: { error: message },
-      content: '',
-      recommendedNextMissions: [],
-      contextUpdates: undefined,
-      memoryItems: undefined,
-      model: def.model,
-      tokenUsage: null,
-      error: message,
+    return failure({
+      def,
+      ctx,
+      phases,
+      error: `plan_phase_failed: ${message}`,
+      model,
+      tokenUsage: aggregateUsage,
+    })
+  }
+
+  // ---- Phase 2: ACT -------------------------------------------------
+  await emitProgress(onProgress, phases, {
+    phase: 'act',
+    title: 'Génération du livrable',
+    description:
+      def.outputFormat === 'json'
+        ? 'Rédaction JSON structurée selon le schéma de la mission.'
+        : 'Rédaction du livrable Markdown.',
+  })
+
+  let actRaw: string
+  try {
+    const actResult = await actPhase(def, ctx, planText)
+    model = actResult.model || model
+    addUsage(actResult.usage)
+    actRaw = actResult.raw
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return failure({
+      def,
+      ctx,
+      phases,
+      error: `act_phase_failed: ${message}`,
+      model,
+      tokenUsage: aggregateUsage,
+    })
+  }
+
+  if (!actRaw.trim()) {
+    return failure({
+      def,
+      ctx,
+      phases,
+      error: 'empty_completion',
+      model,
+      tokenUsage: aggregateUsage,
+    })
+  }
+
+  // ---- Phase 3: SYNTHESIZE -----------------------------------------
+  await emitProgress(onProgress, phases, {
+    phase: 'synthesize',
+    title: 'Validation et extraction',
+    description: 'Vérification du schéma, extraction des recommandations.',
+  })
+
+  if (def.outputFormat === 'json') {
+    const synth = synthesizeJson(actRaw, def)
+    if (!synth.ok) {
+      return failure({
+        def,
+        ctx,
+        phases,
+        error: synth.error,
+        model,
+        tokenUsage: aggregateUsage,
+        rawOutput: actRaw,
+      })
     }
+    const data = synth.data
+    return {
+      ok: true,
+      outputFormat: 'json',
+      title: data.title,
+      summary: data.summary,
+      structured: data as unknown as Record<string, unknown>,
+      content: JSON.stringify(data, null, 2),
+      recommendedNextMissions: Array.isArray(data.recommended_next_missions)
+        ? data.recommended_next_missions
+        : [],
+      contextUpdates: data.context_updates,
+      memoryItems: data.memory_items,
+      model,
+      tokenUsage: aggregateUsage,
+      phases,
+    }
+  }
+
+  const synth = synthesizeMarkdown(actRaw, ctx)
+  if (!synth.ok) {
+    return failure({
+      def,
+      ctx,
+      phases,
+      error: synth.error,
+      model,
+      tokenUsage: aggregateUsage,
+      rawOutput: actRaw,
+    })
+  }
+  const structured: ScanReportOutput = {
+    title: synth.title,
+    summary: synth.summary,
+    markdown: synth.markdown,
+    recommended_next_missions: synth.recommendedNextMissions,
+  }
+  return {
+    ok: true,
+    outputFormat: 'markdown',
+    title: synth.title,
+    summary: synth.summary,
+    structured: structured as unknown as Record<string, unknown>,
+    content: synth.markdown,
+    recommendedNextMissions: synth.recommendedNextMissions,
+    contextUpdates: synth.contextUpdates,
+    memoryItems: synth.memoryItems,
+    model,
+    tokenUsage: aggregateUsage,
+    phases,
+  }
+}
+
+// ---------------------------------------------------------------------
+// Failure helper
+// ---------------------------------------------------------------------
+function failure(params: {
+  def: AgentMissionDefinition
+  ctx: AgentRunContext
+  phases: AgentProgressEvent[]
+  error: string
+  model: string
+  tokenUsage: { input: number; output: number }
+  rawOutput?: string
+}): AgentExecutionResult {
+  return {
+    ok: false,
+    outputFormat: params.def.outputFormat,
+    title: `Échec ${params.ctx.missionTitle}`,
+    summary: params.error,
+    structured: params.rawOutput
+      ? { error: params.error, raw: params.rawOutput }
+      : { error: params.error },
+    content: params.rawOutput ?? '',
+    recommendedNextMissions: [],
+    contextUpdates: undefined,
+    memoryItems: undefined,
+    model: params.model,
+    tokenUsage:
+      params.tokenUsage.input || params.tokenUsage.output
+        ? params.tokenUsage
+        : null,
+    phases: params.phases,
+    error: params.error,
   }
 }

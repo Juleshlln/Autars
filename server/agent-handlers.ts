@@ -14,8 +14,72 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { admin, hasAdmin, resolveUserId } from './supabaseAdmin'
 import { resolveAgentMission } from './agents'
-import { runAgentMission, type AgentExecutionResult } from './agents/runAgentMission'
+import {
+  runAgentMission,
+  type AgentExecutionResult,
+  type AgentProgressEvent,
+} from './agents/runAgentMission'
 import type { AgentRunContext, RecommendedNextMission } from './agents/types'
+import {
+  DecidePayloadSchema,
+  IteratePayloadSchema,
+  NextPayloadSchema,
+  RunPayloadSchema,
+  formatZodError,
+} from './agents/schemas'
+
+// ---------------------------------------------------------------------
+// Failure helper — flips the run/mission/agent to terminal-failed state
+// and emits a `run_failed` activity event so the UI is never stuck in
+// `working` indefinitely.
+// ---------------------------------------------------------------------
+async function markRunFailed(params: {
+  runId: string | null
+  missionId: string
+  workspaceId: string
+  ownerId: string
+  agentId: string | null
+  missionTitle: string
+  error: string
+}) {
+  const sb = admin()
+  if (params.runId) {
+    await sb
+      .from('agent_runs')
+      .update({
+        status: 'failed',
+        error_message: params.error,
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', params.runId)
+      .then(undefined, () => undefined)
+  }
+  await sb
+    .from('missions')
+    .update({ status: 'failed' })
+    .eq('id', params.missionId)
+    .then(undefined, () => undefined)
+  if (params.agentId) {
+    await sb
+      .from('agents')
+      .update({ status: 'idle' })
+      .eq('id', params.agentId)
+      .then(undefined, () => undefined)
+  }
+  await sb
+    .from('activity_events')
+    .insert({
+      workspace_id: params.workspaceId,
+      owner_id: params.ownerId,
+      agent_id: params.agentId,
+      mission_id: params.missionId,
+      event_type: 'run_failed',
+      title: `Échec mission : ${params.missionTitle}`,
+      description: params.error.slice(0, 500),
+      metadata: { run_id: params.runId, error: params.error },
+    })
+    .then(undefined, () => undefined)
+}
 
 // ---------------------------------------------------------------------
 // http helpers
@@ -45,6 +109,31 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
+}
+
+type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<unknown>
+
+// Outer safety net: any throw inside `inner` returns a clean 500 with the
+// error message instead of crashing the Vite middleware. Per-handler logic
+// already does its own state-cleanup via executeRun/markRunFailed; this
+// wrapper exists for cases where an error happens BEFORE executeRun runs.
+function withSafety(inner: Handler): Handler {
+  return async (req, res) => {
+    try {
+      await inner(req, res)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (!res.headersSent) {
+        send(res, 500, { error: 'internal_error', detail: message })
+      } else {
+        try {
+          res.end()
+        } catch {
+          // socket already gone
+        }
+      }
+    }
+  }
 }
 
 function bearerOf(req: IncomingMessage): string | null {
@@ -196,236 +285,270 @@ async function executeRun(params: {
   | { ok: false; error: string }
 > {
   const sb = admin()
+  let runId: string | null = null
 
-  // 1. Create the agent_run in `queued`. Unique partial index prevents
-  // concurrent runs on the same mission.
-  const { data: runRow, error: runInsertError } = await sb
-    .from('agent_runs')
-    .insert({
-      owner_id: params.ownerId,
+  try {
+    // 1. Create the agent_run in `queued`. Unique partial index prevents
+    // concurrent runs on the same mission.
+    const { data: runRow, error: runInsertError } = await sb
+      .from('agent_runs')
+      .insert({
+        owner_id: params.ownerId,
+        workspace_id: params.workspaceId,
+        agent_id: params.agentId,
+        mission_id: params.missionId,
+        status: 'queued',
+        input_context: { type: params.missionType },
+      })
+      .select('id')
+      .single()
+    if (runInsertError || !runRow) {
+      return { ok: false, error: runInsertError?.message ?? 'run_insert_failed' }
+    }
+    runId = runRow.id as string
+
+    // 2. Activity event + mission flip + agent working
+    await sb.from('activity_events').insert({
       workspace_id: params.workspaceId,
+      owner_id: params.ownerId,
       agent_id: params.agentId,
       mission_id: params.missionId,
-      status: 'queued',
-      input_context: { type: params.missionType },
+      event_type: 'run_queued',
+      title: `Agent en file d'attente : ${params.missionTitle}`,
+      description: null,
+      metadata: { run_id: runId },
     })
-    .select('id')
-    .single()
-  if (runInsertError || !runRow) {
-    return { ok: false, error: runInsertError?.message ?? 'run_insert_failed' }
-  }
-  const runId = runRow.id
 
-  // 2. Activity event + mission flip + agent working
-  await sb.from('activity_events').insert({
-    workspace_id: params.workspaceId,
-    owner_id: params.ownerId,
-    agent_id: params.agentId,
-    mission_id: params.missionId,
-    event_type: 'run_queued',
-    title: `Agent en file d'attente : ${params.missionTitle}`,
-    description: null,
-    metadata: { run_id: runId },
-  })
-
-  // 3. Flip run to running, mission to running, agent to working
-  await sb
-    .from('agent_runs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', runId)
-  await sb
-    .from('missions')
-    .update({ status: 'in_progress', last_run_id: runId })
-    .eq('id', params.missionId)
-  if (params.agentId) {
-    await sb.from('agents').update({ status: 'working' }).eq('id', params.agentId)
-  }
-  await sb.from('activity_events').insert({
-    workspace_id: params.workspaceId,
-    owner_id: params.ownerId,
-    agent_id: params.agentId,
-    mission_id: params.missionId,
-    event_type: 'run_started',
-    title: `Agent au travail : ${params.missionTitle}`,
-    description: null,
-    metadata: { run_id: runId },
-  })
-
-  // 4. Execute the LLM call
-  const def = resolveAgentMission(params.missionType)
-  const result = await runAgentMission(def, params.context)
-
-  if (!result.ok) {
+    // 3. Flip run to running, mission to running, agent to working
     await sb
       .from('agent_runs')
-      .update({
-        status: 'failed',
-        error_message: result.error ?? 'unknown_error',
-        completed_at: new Date().toISOString(),
-        model: result.model,
-        token_usage: result.tokenUsage,
-      })
+      .update({ status: 'running', started_at: new Date().toISOString() })
       .eq('id', runId)
-    await sb.from('missions').update({ status: 'failed' }).eq('id', params.missionId)
+    await sb
+      .from('missions')
+      .update({ status: 'in_progress', last_run_id: runId })
+      .eq('id', params.missionId)
     if (params.agentId) {
-      await sb.from('agents').update({ status: 'idle' }).eq('id', params.agentId)
+      await sb.from('agents').update({ status: 'working' }).eq('id', params.agentId)
     }
     await sb.from('activity_events').insert({
       workspace_id: params.workspaceId,
       owner_id: params.ownerId,
       agent_id: params.agentId,
       mission_id: params.missionId,
-      event_type: 'run_failed',
-      title: `Échec mission : ${params.missionTitle}`,
-      description: result.error ?? null,
+      event_type: 'run_started',
+      title: `Agent au travail : ${params.missionTitle}`,
+      description: null,
       metadata: { run_id: runId },
     })
-    return { ok: false, error: result.error ?? 'agent_failed' }
-  }
 
-  // 5. Determine deliverable version (previous + 1 for same mission)
-  const { data: priorMax } = await sb
-    .from('deliverables')
-    .select('version')
-    .eq('mission_id', params.missionId)
-    .order('version', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  const nextVersion = (priorMax?.version ?? 0) + 1
+    // 4. Execute the LLM call with a progress callback that streams each
+    // ReAct phase (plan/act/synthesize) to activity_events.
+    const def = resolveAgentMission(params.missionType)
+    const onProgress = async (evt: AgentProgressEvent) => {
+      await sb.from('activity_events').insert({
+        workspace_id: params.workspaceId,
+        owner_id: params.ownerId,
+        agent_id: params.agentId,
+        mission_id: params.missionId,
+        event_type: 'agent_thinking',
+        title: evt.title,
+        description: evt.description,
+        metadata: { run_id: runId, phase: evt.phase },
+      })
+    }
+    const result = await runAgentMission(def, params.context, onProgress)
 
-  // 6. Insert the deliverable
-  const { data: deliverable, error: deliverableError } = await sb
-    .from('deliverables')
-    .insert({
-      owner_id: params.ownerId,
-      workspace_id: params.workspaceId,
-      mission_id: params.missionId,
-      agent_run_id: runId,
-      previous_version_id: params.previousDeliverableId ?? null,
-      agent_id: params.agentId,
-      title: result.title,
-      type: result.outputFormat === 'json' ? 'structured' : 'markdown',
-      content: result.content,
-      structured_content: result.structured,
-      version: nextVersion,
-      status: 'pending_validation',
-    })
-    .select('id')
-    .single()
-  if (deliverableError || !deliverable) {
+    if (!result.ok) {
+      await sb
+        .from('agent_runs')
+        .update({
+          status: 'failed',
+          error_message: result.error ?? 'unknown_error',
+          completed_at: new Date().toISOString(),
+          model: result.model,
+          token_usage: result.tokenUsage,
+        })
+        .eq('id', runId)
+      await sb.from('missions').update({ status: 'failed' }).eq('id', params.missionId)
+      if (params.agentId) {
+        await sb.from('agents').update({ status: 'idle' }).eq('id', params.agentId)
+      }
+      await sb.from('activity_events').insert({
+        workspace_id: params.workspaceId,
+        owner_id: params.ownerId,
+        agent_id: params.agentId,
+        mission_id: params.missionId,
+        event_type: 'run_failed',
+        title: `Échec mission : ${params.missionTitle}`,
+        description: (result.error ?? '').slice(0, 500),
+        metadata: { run_id: runId, error: result.error ?? null },
+      })
+      return { ok: false, error: result.error ?? 'agent_failed' }
+    }
+
+    // 5. Determine deliverable version (previous + 1 for same mission)
+    const { data: priorMax } = await sb
+      .from('deliverables')
+      .select('version')
+      .eq('mission_id', params.missionId)
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    const nextVersion = (priorMax?.version ?? 0) + 1
+
+    // 6. Insert the deliverable
+    const { data: deliverable, error: deliverableError } = await sb
+      .from('deliverables')
+      .insert({
+        owner_id: params.ownerId,
+        workspace_id: params.workspaceId,
+        mission_id: params.missionId,
+        agent_run_id: runId,
+        previous_version_id: params.previousDeliverableId ?? null,
+        agent_id: params.agentId,
+        title: result.title,
+        type: result.outputFormat === 'json' ? 'structured' : 'markdown',
+        content: result.content,
+        structured_content: result.structured,
+        version: nextVersion,
+        status: 'pending_validation',
+      })
+      .select('id')
+      .single()
+    if (deliverableError || !deliverable) {
+      const errMsg = deliverableError?.message ?? 'deliverable_insert_failed'
+      await markRunFailed({
+        runId,
+        missionId: params.missionId,
+        workspaceId: params.workspaceId,
+        ownerId: params.ownerId,
+        agentId: params.agentId,
+        missionTitle: params.missionTitle,
+        error: errMsg,
+      })
+      return { ok: false, error: errMsg }
+    }
+
+    // 7. Workspace context updates
+    if (result.contextUpdates) {
+      const updates: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(result.contextUpdates)) {
+        if (typeof value === 'string' && value.trim()) updates[key] = value
+      }
+      if (Object.keys(updates).length > 0) {
+        await sb
+          .from('workspace_context')
+          .update(updates)
+          .eq('workspace_id', params.workspaceId)
+      }
+    }
+
+    // 8. Agent memory items
+    if (params.agentId && result.memoryItems && result.memoryItems.length > 0) {
+      await sb.from('agent_memory').insert(
+        result.memoryItems.slice(0, 8).map((m) => ({
+          owner_id: params.ownerId,
+          workspace_id: params.workspaceId,
+          agent_id: params.agentId as string,
+          memory_type: m.memory_type,
+          content: m.content,
+          source_mission_id: params.missionId,
+          source_deliverable_id: deliverable.id,
+        })),
+      )
+    }
+
+    // 9. Close the run + flip mission to waiting_user_decision
     await sb
       .from('agent_runs')
       .update({
-        status: 'failed',
-        error_message: deliverableError?.message ?? 'deliverable_insert_failed',
+        status: 'waiting_user_decision',
         completed_at: new Date().toISOString(),
+        output_summary: result.summary,
+        model: result.model,
+        token_usage: result.tokenUsage,
       })
       .eq('id', runId)
-    return { ok: false, error: deliverableError?.message ?? 'deliverable_insert_failed' }
-  }
 
-  // 7. Workspace context updates (only for clarify-business-idea so far)
-  if (result.contextUpdates) {
-    const updates: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(result.contextUpdates)) {
-      if (typeof value === 'string' && value.trim()) updates[key] = value
-    }
-    if (Object.keys(updates).length > 0) {
-      await sb
-        .from('workspace_context')
-        .update(updates)
-        .eq('workspace_id', params.workspaceId)
-    }
-  }
+    await sb
+      .from('missions')
+      .update({
+        status: 'waiting_user_decision',
+        current_deliverable_id: deliverable.id,
+        result: {
+          summary: result.summary,
+          deliverable_id: deliverable.id,
+          agent_run_id: runId,
+        },
+      })
+      .eq('id', params.missionId)
 
-  // 8. Agent memory items
-  if (params.agentId && result.memoryItems && result.memoryItems.length > 0) {
-    await sb.from('agent_memory').insert(
-      result.memoryItems.slice(0, 8).map((m) => ({
-        owner_id: params.ownerId,
+    if (params.agentId) {
+      await sb.from('agents').update({ status: 'done' }).eq('id', params.agentId)
+    }
+
+    await sb.from('activity_events').insert([
+      {
         workspace_id: params.workspaceId,
-        agent_id: params.agentId as string,
-        memory_type: m.memory_type,
-        content: m.content,
-        source_mission_id: params.missionId,
-        source_deliverable_id: deliverable.id,
-      })),
-    )
-  }
-
-  // 9. Close the run + flip mission to waiting_user_decision
-  await sb
-    .from('agent_runs')
-    .update({
-      status: 'waiting_user_decision',
-      completed_at: new Date().toISOString(),
-      output_summary: result.summary,
-      model: result.model,
-      token_usage: result.tokenUsage,
-    })
-    .eq('id', runId)
-
-  await sb
-    .from('missions')
-    .update({
-      status: 'waiting_user_decision',
-      current_deliverable_id: deliverable.id,
-      result: {
-        summary: result.summary,
-        deliverable_id: deliverable.id,
-        agent_run_id: runId,
+        owner_id: params.ownerId,
+        agent_id: params.agentId,
+        mission_id: params.missionId,
+        event_type: 'run_completed',
+        title: `Agent a terminé : ${params.missionTitle}`,
+        description: result.summary?.slice(0, 200) ?? null,
+        metadata: { run_id: runId, deliverable_id: deliverable.id },
       },
+      {
+        workspace_id: params.workspaceId,
+        owner_id: params.ownerId,
+        agent_id: params.agentId,
+        mission_id: params.missionId,
+        event_type: 'deliverable_created',
+        title: `Livrable prêt : ${result.title}`,
+        description: result.summary?.slice(0, 200) ?? null,
+        metadata: { deliverable_id: deliverable.id, version: nextVersion },
+      },
+    ])
+
+    return { ok: true, runId, deliverableId: deliverable.id, result }
+  } catch (err) {
+    // Last-resort safety net. Any uncaught exception (LLM timeout, network
+    // error, supabase fault, JSON parse blowup) ends here. We flip every
+    // moving piece back to a terminal state so the UI doesn't get stuck
+    // showing an agent forever "working".
+    const message = err instanceof Error ? err.message : String(err)
+    await markRunFailed({
+      runId,
+      missionId: params.missionId,
+      workspaceId: params.workspaceId,
+      ownerId: params.ownerId,
+      agentId: params.agentId,
+      missionTitle: params.missionTitle,
+      error: `unexpected_error: ${message}`,
     })
-    .eq('id', params.missionId)
-
-  if (params.agentId) {
-    await sb.from('agents').update({ status: 'done' }).eq('id', params.agentId)
+    return { ok: false, error: message }
   }
-
-  await sb.from('activity_events').insert([
-    {
-      workspace_id: params.workspaceId,
-      owner_id: params.ownerId,
-      agent_id: params.agentId,
-      mission_id: params.missionId,
-      event_type: 'run_completed',
-      title: `Agent a terminé : ${params.missionTitle}`,
-      description: result.summary?.slice(0, 200) ?? null,
-      metadata: { run_id: runId, deliverable_id: deliverable.id },
-    },
-    {
-      workspace_id: params.workspaceId,
-      owner_id: params.ownerId,
-      agent_id: params.agentId,
-      mission_id: params.missionId,
-      event_type: 'deliverable_created',
-      title: `Livrable prêt : ${result.title}`,
-      description: result.summary?.slice(0, 200) ?? null,
-      metadata: { deliverable_id: deliverable.id, version: nextVersion },
-    },
-  ])
-
-  return { ok: true, runId, deliverableId: deliverable.id, result }
 }
 
 // ---------------------------------------------------------------------
 // POST /api/agents/run
 // ---------------------------------------------------------------------
-interface RunPayload {
-  missionId: string
-}
-
-export async function handleAgentRun(req: IncomingMessage, res: ServerResponse) {
+export const handleAgentRun: Handler = withSafety(async (req, res) => {
   const ownerId = await requireAuth(req, res)
   if (!ownerId) return
 
-  let payload: RunPayload
+  let rawPayload: unknown
   try {
-    payload = await readJson<RunPayload>(req)
+    rawPayload = await readJson<unknown>(req)
   } catch (err) {
     return send(res, 400, { error: 'invalid_json', detail: String(err) })
   }
-  if (!payload?.missionId) return send(res, 400, { error: 'missing_missionId' })
+  const parsed = RunPayloadSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    return send(res, 400, { error: 'invalid_payload', detail: formatZodError(parsed.error) })
+  }
+  const payload = parsed.data
 
   const sb = admin()
   const { data: mission, error: missionError } = await sb
@@ -522,29 +645,26 @@ export async function handleAgentRun(req: IncomingMessage, res: ServerResponse) 
     deliverableId: execution.deliverableId,
     newBalance: consume.new_balance,
   })
-}
+})
 
 // ---------------------------------------------------------------------
 // POST /api/agents/iterate
 // ---------------------------------------------------------------------
-interface IteratePayload {
-  deliverableId: string
-  feedback: string
-}
-
-export async function handleAgentIterate(req: IncomingMessage, res: ServerResponse) {
+export const handleAgentIterate: Handler = withSafety(async (req, res) => {
   const ownerId = await requireAuth(req, res)
   if (!ownerId) return
 
-  let payload: IteratePayload
+  let rawPayload: unknown
   try {
-    payload = await readJson<IteratePayload>(req)
+    rawPayload = await readJson<unknown>(req)
   } catch (err) {
     return send(res, 400, { error: 'invalid_json', detail: String(err) })
   }
-  if (!payload?.deliverableId || !payload?.feedback) {
-    return send(res, 400, { error: 'missing_fields' })
+  const parsed = IteratePayloadSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    return send(res, 400, { error: 'invalid_payload', detail: formatZodError(parsed.error) })
   }
+  const payload = parsed.data
 
   const sb = admin()
   const { data: deliverable, error: dErr } = await sb
@@ -616,33 +736,26 @@ export async function handleAgentIterate(req: IncomingMessage, res: ServerRespon
     runId: execution.runId,
     deliverableId: execution.deliverableId,
   })
-}
+})
 
 // ---------------------------------------------------------------------
 // POST /api/agents/decide  (validate | reject)
 // ---------------------------------------------------------------------
-interface DecidePayload {
-  deliverableId: string
-  decision: 'validated' | 'rejected'
-  feedback?: string
-}
-
-export async function handleAgentDecide(req: IncomingMessage, res: ServerResponse) {
+export const handleAgentDecide: Handler = withSafety(async (req, res) => {
   const ownerId = await requireAuth(req, res)
   if (!ownerId) return
 
-  let payload: DecidePayload
+  let rawPayload: unknown
   try {
-    payload = await readJson<DecidePayload>(req)
+    rawPayload = await readJson<unknown>(req)
   } catch (err) {
     return send(res, 400, { error: 'invalid_json', detail: String(err) })
   }
-  if (
-    !payload?.deliverableId ||
-    (payload.decision !== 'validated' && payload.decision !== 'rejected')
-  ) {
-    return send(res, 400, { error: 'invalid_payload' })
+  const parsed = DecidePayloadSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    return send(res, 400, { error: 'invalid_payload', detail: formatZodError(parsed.error) })
   }
+  const payload = parsed.data
 
   const sb = admin()
   const { data: deliverable, error: dErr } = await sb
@@ -732,16 +845,11 @@ export async function handleAgentDecide(req: IncomingMessage, res: ServerRespons
   }
 
   return send(res, 200, { ok: true })
-}
+})
 
 // ---------------------------------------------------------------------
 // POST /api/agents/next
 // ---------------------------------------------------------------------
-interface NextPayload {
-  fromDeliverableId: string
-  recommendationIndex: number
-}
-
 const ROLE_TO_AGENT_NAME: Record<string, string> = {
   strategist: 'Stratège',
   builder: 'Builder',
@@ -749,22 +857,21 @@ const ROLE_TO_AGENT_NAME: Record<string, string> = {
   finance: 'Finance',
 }
 
-export async function handleAgentNext(req: IncomingMessage, res: ServerResponse) {
+export const handleAgentNext: Handler = withSafety(async (req, res) => {
   const ownerId = await requireAuth(req, res)
   if (!ownerId) return
 
-  let payload: NextPayload
+  let rawPayload: unknown
   try {
-    payload = await readJson<NextPayload>(req)
+    rawPayload = await readJson<unknown>(req)
   } catch (err) {
     return send(res, 400, { error: 'invalid_json', detail: String(err) })
   }
-  if (
-    !payload?.fromDeliverableId ||
-    typeof payload.recommendationIndex !== 'number'
-  ) {
-    return send(res, 400, { error: 'invalid_payload' })
+  const parsed = NextPayloadSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    return send(res, 400, { error: 'invalid_payload', detail: formatZodError(parsed.error) })
   }
+  const payload = parsed.data
 
   const sb = admin()
   const { data: deliverable, error: dErr } = await sb
@@ -810,4 +917,4 @@ export async function handleAgentNext(req: IncomingMessage, res: ServerResponse)
   if (!row?.ok) return send(res, 500, { error: row?.error ?? 'rpc_failed' })
 
   return send(res, 200, { ok: true, missionId: row.mission_id })
-}
+})

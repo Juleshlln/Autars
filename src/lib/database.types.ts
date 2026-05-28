@@ -29,6 +29,7 @@ export type ActivityEventType =
   | 'run_started'
   | 'run_completed'
   | 'run_failed'
+  | 'agent_thinking'
   | 'deliverable_created'
   | 'deliverable_validated'
   | 'deliverable_iteration_requested'

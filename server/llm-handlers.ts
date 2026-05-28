@@ -1,38 +1,61 @@
+// =====================================================================
+// Legacy LLM streaming endpoints — /api/llm/brief, /api/llm/mission
+// =====================================================================
+// These endpoints power the original "scan / positioning / brand-kit"
+// briefing flow (a guided chat where the agent asks 4 questions, then
+// produces a markdown report). They predate the real agent runner in
+// server/agent-handlers.ts but are still wired into the UI.
+//
+// Both endpoints stream Server-Sent Events to the browser. The client
+// reads only `delta` and `done` events (see src/game/llm.ts), so tool
+// events that existed in the original Anthropic-tools build have been
+// dropped.
+//
+// All LLM I/O goes through server/llmClient.ts (OpenAI-compatible) so
+// the same code works against Claude, GPT, or any local Ollama/vLLM
+// model by changing env vars only.
+// =====================================================================
+
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import Anthropic from '@anthropic-ai/sdk'
+import { z } from 'zod'
 import { MISSIONS, type MissionKey } from './missions'
+import { getLLM, getLLMConfig } from './llmClient'
 
-export interface BriefMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
+// ---------------------------------------------------------------------
+// Payload schemas
+// ---------------------------------------------------------------------
+const BriefMessageSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().max(8000),
+})
 
-export interface VentureContext {
-  name: string
-  subtitle: string
-  industry: string
-}
+const VentureContextSchema = z.object({
+  name: z.string().min(1).max(200),
+  subtitle: z.string().max(400),
+  industry: z.string().max(200),
+})
 
-interface BriefPayload {
-  missionKey: MissionKey
-  venture: VentureContext
-  history: BriefMessage[]
-}
+const MissionKeySchema = z.enum(['scan', 'positioning', 'brand-kit'])
 
-interface MissionPayload {
-  missionKey: MissionKey
-  venture: VentureContext
-  brief: BriefMessage[]
-}
+const BriefPayloadSchema = z.object({
+  missionKey: MissionKeySchema,
+  venture: VentureContextSchema,
+  history: z.array(BriefMessageSchema).max(50),
+})
 
-function getClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY missing on server')
-  }
-  return new Anthropic({ apiKey })
-}
+const MissionPayloadSchema = z.object({
+  missionKey: MissionKeySchema,
+  venture: VentureContextSchema,
+  brief: z.array(BriefMessageSchema).max(50),
+})
 
+export type BriefMessage = z.infer<typeof BriefMessageSchema>
+export type VentureContext = z.infer<typeof VentureContextSchema>
+export type { MissionKey }
+
+// ---------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------
 async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
   return new Promise((resolve, reject) => {
     let raw = ''
@@ -82,46 +105,50 @@ function sseError(res: ServerResponse, message: string) {
   }
 }
 
+// ---------------------------------------------------------------------
+// /api/llm/brief
+// ---------------------------------------------------------------------
 export async function handleBrief(req: IncomingMessage, res: ServerResponse) {
-  let payload: BriefPayload
+  let rawPayload: unknown
   try {
-    payload = await readJsonBody<BriefPayload>(req)
+    rawPayload = await readJsonBody<unknown>(req)
   } catch (err) {
     return sseError(res, err instanceof Error ? err.message : 'bad request')
   }
-  const { missionKey, venture, history } = payload
+  const parsed = BriefPayloadSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    return sseError(res, `invalid_payload: ${parsed.error.message}`)
+  }
+  const { missionKey, venture, history } = parsed.data
   const config = MISSIONS[missionKey]
-  if (!config || !venture || !Array.isArray(history)) {
-    return sseError(res, 'invalid payload')
-  }
-
-  let client: Anthropic
-  try {
-    client = getClient()
-  } catch (err) {
-    return sseError(res, err instanceof Error ? err.message : 'server config')
-  }
 
   writeSseHeaders(res)
   try {
-    const stream = client.messages.stream({
-      model: 'claude-sonnet-4-5',
+    const client = getLLM()
+    const cfg = getLLMConfig()
+    const stream = await client.chat.completions.create({
+      model: cfg.model,
       max_tokens: config.maxBriefTokens,
-      system: `${config.briefSystem}
+      temperature: 0.5,
+      stream: true,
+      messages: [
+        {
+          role: 'system',
+          content: `${config.briefSystem}
 
 Contexte filiale :
 - Nom : ${venture.name}
 - Pitch : ${venture.subtitle}
 - Industrie : ${venture.industry}`,
-      messages: history.map((m) => ({ role: m.role, content: m.content })),
+        },
+        ...history.map((m) => ({ role: m.role, content: m.content })),
+      ],
     })
 
-    for await (const event of stream) {
-      if (
-        event.type === 'content_block_delta' &&
-        event.delta.type === 'text_delta'
-      ) {
-        sseSend(res, 'delta', { text: event.delta.text })
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content
+      if (typeof delta === 'string' && delta.length > 0) {
+        sseSend(res, 'delta', { text: delta })
       }
     }
     sseSend(res, 'done', {})
@@ -130,52 +157,46 @@ Contexte filiale :
       message: err instanceof Error ? err.message : 'stream failed',
     })
   } finally {
-    res.end()
+    try {
+      res.end()
+    } catch {
+      // socket already closed
+    }
   }
 }
 
+// ---------------------------------------------------------------------
+// /api/llm/mission
+// ---------------------------------------------------------------------
 export async function handleMission(req: IncomingMessage, res: ServerResponse) {
-  let payload: MissionPayload
+  let rawPayload: unknown
   try {
-    payload = await readJsonBody<MissionPayload>(req)
+    rawPayload = await readJsonBody<unknown>(req)
   } catch (err) {
     return sseError(res, err instanceof Error ? err.message : 'bad request')
   }
-  const { missionKey, venture, brief } = payload
+  const parsed = MissionPayloadSchema.safeParse(rawPayload)
+  if (!parsed.success) {
+    return sseError(res, `invalid_payload: ${parsed.error.message}`)
+  }
+  const { missionKey, venture, brief } = parsed.data
   const config = MISSIONS[missionKey]
-  if (!config || !venture || !Array.isArray(brief)) {
-    return sseError(res, 'invalid payload')
-  }
-
-  let client: Anthropic
-  try {
-    client = getClient()
-  } catch (err) {
-    return sseError(res, err instanceof Error ? err.message : 'server config')
-  }
 
   writeSseHeaders(res)
   const briefText = brief
     .map((m) => `${m.role === 'user' ? 'Fondateur' : 'Agent'}: ${m.content}`)
     .join('\n\n')
 
-  const tools: Array<{ type: string; name: string }> = []
-  if (config.enableWebSearch) {
-    tools.push({ type: 'web_search_20260209', name: 'web_search' })
-  }
-  if (config.enableWebFetch) {
-    tools.push({ type: 'web_fetch_20260209', name: 'web_fetch' })
-  }
-
   try {
-    const stream = client.messages.stream({
-      model: 'claude-sonnet-4-5',
+    const client = getLLM()
+    const cfg = getLLMConfig()
+    const stream = await client.chat.completions.create({
+      model: cfg.model,
       max_tokens: config.maxMissionTokens,
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'medium' },
-      ...(tools.length > 0 ? { tools } : {}),
-      system: config.missionSystem,
+      temperature: 0.4,
+      stream: true,
       messages: [
+        { role: 'system', content: config.missionSystem },
         {
           role: 'user',
           content: `Filiale : ${venture.name} — ${venture.subtitle} (industrie : ${venture.industry})
@@ -186,23 +207,12 @@ ${briefText}
 ${config.missionUserSuffix}`,
         },
       ],
-    } as Parameters<typeof client.messages.stream>[0])
+    })
 
-    for await (const event of stream) {
-      if (event.type === 'content_block_start') {
-        if (event.content_block.type === 'server_tool_use') {
-          sseSend(res, 'tool', { name: event.content_block.name })
-        } else if (
-          event.content_block.type === 'web_search_tool_result' ||
-          event.content_block.type === 'web_fetch_tool_result'
-        ) {
-          sseSend(res, 'tool_result', { kind: event.content_block.type })
-        }
-      } else if (
-        event.type === 'content_block_delta' &&
-        event.delta.type === 'text_delta'
-      ) {
-        sseSend(res, 'delta', { text: event.delta.text })
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content
+      if (typeof delta === 'string' && delta.length > 0) {
+        sseSend(res, 'delta', { text: delta })
       }
     }
     sseSend(res, 'done', {})
@@ -211,6 +221,10 @@ ${config.missionUserSuffix}`,
       message: err instanceof Error ? err.message : 'stream failed',
     })
   } finally {
-    res.end()
+    try {
+      res.end()
+    } catch {
+      // socket already closed
+    }
   }
 }
