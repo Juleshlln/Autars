@@ -2,6 +2,8 @@
 // Agent system - shared types (server-side only)
 // =====================================================================
 
+import type { ToolDefinition } from '../tools'
+
 export type AgentRole = 'strategist' | 'builder' | 'growth' | 'finance'
 
 export type AgentMissionType =
@@ -108,6 +110,14 @@ export interface AgentMissionDefinition {
   maxTokens: number
   enableWebSearch?: boolean
   enableWebFetch?: boolean
+  // Tool registry override. When omitted, runAgentMission defaults to
+  // toolsForRole(role) — every agent gets web + memory + the actions
+  // appropriate to its role. Set to `[]` to fully disable tool calling
+  // for missions that must stay deterministic (e.g. clarify-business-idea).
+  tools?: ToolDefinition[]
+  // Hard ceiling on tool-loop iterations inside the ACT phase. Protects
+  // against tool-call infinite loops. Defaults to 4 if omitted.
+  maxToolIterations?: number
   // For JSON outputs: zero-runtime-cost shape validator. Returns null
   // if the parsed object is valid, otherwise a short error string.
   validateOutput?: (parsed: unknown) => string | null

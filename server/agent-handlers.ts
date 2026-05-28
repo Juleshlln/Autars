@@ -19,6 +19,7 @@ import {
   type AgentExecutionResult,
   type AgentProgressEvent,
 } from './agents/runAgentMission'
+import { indexDeliverable, hasEmbeddings } from './memory'
 import type { AgentRunContext, RecommendedNextMission } from './agents/types'
 import {
   DecidePayloadSchema,
@@ -457,6 +458,41 @@ async function executeRun(params: {
           source_deliverable_id: deliverable.id,
         })),
       )
+    }
+
+    // 8b. Long-term memory — embed + insert into agent_memories so future
+    // missions can RAG-recall this deliverable via the `search_memory`
+    // tool. Best-effort: a missing OPENAI_EMBED_API_KEY or a network
+    // hiccup must NEVER fail the mission.
+    if (hasEmbeddings() && result.content) {
+      try {
+        const indexed = await indexDeliverable({
+          ownerId: params.ownerId,
+          workspaceId: params.workspaceId,
+          agentId: params.agentId,
+          missionId: params.missionId,
+          deliverableId: deliverable.id,
+          title: result.title,
+          content: result.content,
+        })
+        if (indexed.ok) {
+          await sb.from('activity_events').insert({
+            workspace_id: params.workspaceId,
+            owner_id: params.ownerId,
+            agent_id: params.agentId,
+            mission_id: params.missionId,
+            event_type: 'agent_thinking',
+            title: 'Mémoire indexée',
+            description: `${indexed.inserted} chunk(s) RAG ajoutés.`,
+            metadata: { deliverable_id: deliverable.id, chunks: indexed.inserted },
+          })
+        }
+      } catch (err) {
+        console.warn(
+          '[agent-handlers] indexDeliverable threw:',
+          err instanceof Error ? err.message : String(err),
+        )
+      }
     }
 
     // 9. Close the run + flip mission to waiting_user_decision

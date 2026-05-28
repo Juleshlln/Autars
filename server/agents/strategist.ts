@@ -151,6 +151,9 @@ export const STRATEGIST_CLARIFY: AgentMissionDefinition = {
   maxTokens: 4000,
   enableWebSearch: false,
   enableWebFetch: false,
+  // Clarify is intentionally tool-free: it must converge on a single JSON
+  // structured output without going off to scrape the web.
+  tools: [],
   validateOutput: validateClarify,
 }
 

@@ -37,6 +37,15 @@ import {
   ClarifyBusinessIdeaOutputSchema,
   formatZodError,
 } from './schemas'
+import {
+  asOpenAITools,
+  executeToolCalls,
+  toolsForRole,
+  type OpenAIToolCall,
+  type OpenAIToolMessage,
+  type ToolDefinition,
+  type ToolExecutionContext,
+} from '../tools'
 
 export type AgentPhase = 'plan' | 'act' | 'synthesize'
 
@@ -243,6 +252,8 @@ async function actPhase(
   def: AgentMissionDefinition,
   ctx: AgentRunContext,
   planText: string,
+  onProgress: ProgressCallback | undefined,
+  phasesAcc: AgentProgressEvent[],
 ): Promise<{ raw: string; model: string; usage: CompletionUsage | undefined }> {
   const client = getLLM()
   const cfg = getLLMConfig()
@@ -251,41 +262,116 @@ async function actPhase(
     ? `${baseUserPrompt}\n\nPlan annoncé :\n${planText}\n\nProduis maintenant le livrable demandé en respectant ce plan.`
     : baseUserPrompt
 
-  if (def.outputFormat === 'json') {
+  // Resolve the tool registry for this mission. Pass `tools: []` in the
+  // definition to fully disable tool calling for a strict-JSON mission.
+  const toolDefs: ToolDefinition[] =
+    def.tools !== undefined ? def.tools : toolsForRole(def.role)
+  const useTools = toolDefs.length > 0
+  const maxIterations = def.maxToolIterations ?? 4
+  const toolCtx: ToolExecutionContext = {
+    workspaceId: ctx.workspaceId,
+    ownerId: ctx.ownerId,
+    agentId: ctx.agentId,
+    missionId: ctx.missionId,
+  }
+
+  const systemContent =
+    def.outputFormat === 'markdown'
+      ? `${def.systemPrompt}\n${MARKDOWN_METADATA_SUFFIX}`
+      : def.systemPrompt
+
+  // We keep a free-form `messages` array so we can append tool outputs
+  // between iterations of the tool loop.
+  const messages: Array<
+    | { role: 'system'; content: string }
+    | { role: 'user'; content: string }
+    | {
+        role: 'assistant'
+        content: string | null
+        tool_calls?: OpenAIToolCall[]
+      }
+    | OpenAIToolMessage
+  > = [
+    { role: 'system', content: systemContent },
+    { role: 'user', content: userPrompt },
+  ]
+
+  let aggregateUsage: CompletionUsage = {}
+  const addUsage = (u: CompletionUsage | undefined) => {
+    if (!u) return
+    aggregateUsage.prompt_tokens =
+      (aggregateUsage.prompt_tokens ?? 0) + (u.prompt_tokens ?? 0)
+    aggregateUsage.completion_tokens =
+      (aggregateUsage.completion_tokens ?? 0) + (u.completion_tokens ?? 0)
+  }
+  let lastModel = cfg.model
+
+  for (let iteration = 0; iteration <= maxIterations; iteration++) {
+    const isLastIteration = iteration === maxIterations
+    // On the final iteration we drop the tools to force the model to
+    // produce its final answer instead of asking for yet another call.
     const completion = await client.chat.completions.create({
       model: cfg.model,
       max_tokens: def.maxTokens,
-      temperature: 0.3,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: def.systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
+      temperature: def.outputFormat === 'json' ? 0.3 : 0.4,
+      ...(def.outputFormat === 'json' && !useTools
+        ? { response_format: { type: 'json_object' as const } }
+        : {}),
+      ...(useTools && !isLastIteration
+        ? {
+            tools: asOpenAITools(toolDefs),
+            tool_choice: 'auto' as const,
+          }
+        : {}),
+      // Note: the OpenAI types here are intentionally loose because we
+      // append `tool` and `assistant.tool_calls` messages between turns;
+      // the SDK accepts them at runtime regardless.
+      messages: messages as unknown as Parameters<
+        typeof client.chat.completions.create
+      >[0]['messages'],
     })
+    lastModel = completion.model || lastModel
+    addUsage(completion.usage)
+
+    const choice = completion.choices[0]
+    const assistantMsg = choice?.message
+    const toolCalls = (assistantMsg?.tool_calls ?? []) as OpenAIToolCall[]
+
+    if (useTools && toolCalls.length > 0 && !isLastIteration) {
+      // Persist the assistant turn (with its tool_calls) before appending
+      // the tool outputs — OpenAI requires the strict ordering
+      //   assistant{tool_calls} → tool{...} → tool{...} → assistant{...}
+      messages.push({
+        role: 'assistant',
+        content: assistantMsg?.content ?? null,
+        tool_calls: toolCalls,
+      })
+      const dispatch = await executeToolCalls({
+        toolCalls,
+        tools: toolDefs,
+        ctx: toolCtx,
+        onProgress: async (entry) => {
+          await emitProgress(onProgress, phasesAcc, {
+            phase: 'act',
+            title: entry.display,
+            description: entry.ok ? null : 'Échec outil',
+          })
+        },
+      })
+      for (const m of dispatch.messages) messages.push(m)
+      continue
+    }
+
     return {
-      raw: completion.choices[0]?.message?.content ?? '',
-      model: completion.model,
-      usage: completion.usage,
+      raw: assistantMsg?.content ?? '',
+      model: lastModel,
+      usage: aggregateUsage,
     }
   }
 
-  const completion = await client.chat.completions.create({
-    model: cfg.model,
-    max_tokens: def.maxTokens,
-    temperature: 0.4,
-    messages: [
-      {
-        role: 'system',
-        content: `${def.systemPrompt}\n${MARKDOWN_METADATA_SUFFIX}`,
-      },
-      { role: 'user', content: userPrompt },
-    ],
-  })
-  return {
-    raw: completion.choices[0]?.message?.content ?? '',
-    model: completion.model,
-    usage: completion.usage,
-  }
+  // Should be unreachable: loop returns on the iteration that has no
+  // tool_calls (or the forced final iteration). Belt-and-braces.
+  return { raw: '', model: lastModel, usage: aggregateUsage }
 }
 
 // ---------------------------------------------------------------------
@@ -431,7 +517,7 @@ export async function runAgentMission(
 
   let actRaw: string
   try {
-    const actResult = await actPhase(def, ctx, planText)
+    const actResult = await actPhase(def, ctx, planText, onProgress, phases)
     model = actResult.model || model
     addUsage(actResult.usage)
     actRaw = actResult.raw

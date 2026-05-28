@@ -7,6 +7,7 @@ import {
   handleAgentNext,
   handleAgentRun,
 } from './server/agent-handlers'
+import { handleStripeWebhook } from './server/stripe-webhook'
 import { hasAdmin } from './server/supabaseAdmin'
 
 interface ServerEnv {
@@ -19,6 +20,20 @@ interface ServerEnv {
   SUPABASE_ANON_KEY?: string
   VITE_SUPABASE_URL?: string
   VITE_SUPABASE_ANON_KEY?: string
+  // Embeddings / RAG
+  OPENAI_API_KEY?: string
+  OPENAI_EMBED_API_KEY?: string
+  OPENAI_EMBED_BASE_URL?: string
+  // Outbound action tools
+  MAKE_WEBHOOK_URL?: string
+  BREVO_API_KEY?: string
+  BREVO_DEFAULT_FROM_EMAIL?: string
+  BREVO_DEFAULT_FROM_NAME?: string
+  VERCEL_TOKEN?: string
+  VERCEL_TEAM_ID?: string
+  // Stripe webhook
+  STRIPE_WEBHOOK_SECRET?: string
+  STRIPE_DEFAULT_CREDITS?: string
 }
 
 function applyServerEnv(env: ServerEnv) {
@@ -32,6 +47,17 @@ function applyServerEnv(env: ServerEnv) {
     'SUPABASE_ANON_KEY',
     'VITE_SUPABASE_URL',
     'VITE_SUPABASE_ANON_KEY',
+    'OPENAI_API_KEY',
+    'OPENAI_EMBED_API_KEY',
+    'OPENAI_EMBED_BASE_URL',
+    'MAKE_WEBHOOK_URL',
+    'BREVO_API_KEY',
+    'BREVO_DEFAULT_FROM_EMAIL',
+    'BREVO_DEFAULT_FROM_NAME',
+    'VERCEL_TOKEN',
+    'VERCEL_TEAM_ID',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_DEFAULT_CREDITS',
   ]
   for (const key of passthrough) {
     const value = env[key]
@@ -77,6 +103,7 @@ function llmProxyPlugin(env: ServerEnv): PluginOption {
           if (path === '/api/agents/iterate') return void handleAgentIterate(req, res)
           if (path === '/api/agents/decide') return void handleAgentDecide(req, res)
           if (path === '/api/agents/next') return void handleAgentNext(req, res)
+          if (path === '/api/stripe/webhook') return void handleStripeWebhook(req, res)
         }
 
         next()
