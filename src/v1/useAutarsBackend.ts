@@ -38,7 +38,9 @@ import {
 } from '../services/deliverablesService'
 import {
   AgentRunAlreadyActiveError,
+  AgentRunFailedError,
   AgentRunInsufficientCreditsError,
+  AgentRunMissingApiKeyError,
   createNextMissionFromRecommendation,
   decideOnDeliverable,
   iterateOnDeliverable,
@@ -54,6 +56,45 @@ import {
   loadSnapshot,
   saveSnapshot,
 } from './storage'
+
+// Map a mission's visible title (and optional agent id) to one of the
+// backend mission_type values understood by server/agents/index.ts
+// (resolveAgentMission). Unknown titles fall back to
+// 'clarify-business-idea' which is also the orchestrator's default.
+function resolveMissionType(
+  title: string,
+  agentId?: string,
+): string {
+  const norm = title
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+  if (norm.includes('clarif')) return 'clarify-business-idea'
+  if (
+    norm.includes('analyser mon marche') ||
+    norm.includes('analyser les concurrent') ||
+    norm.includes('scan') ||
+    norm.includes('opportunit')
+  ) {
+    return 'scan'
+  }
+  if (norm.includes('cible') || norm.includes('segment') || norm.includes('persona')) {
+    return 'segment'
+  }
+  if (norm.includes('positionne')) return 'positioning'
+  if (norm.includes('proposition de valeur') || norm.includes('value prop')) {
+    return 'value-prop'
+  }
+  if (norm.includes('offre') || norm.includes('offer')) return 'offer'
+  if (norm.includes('landing') || norm.includes('page')) return 'landing'
+  if (norm.includes('acquisition') || norm.includes('canaux')) return 'acquisition'
+  if (norm.includes('brand') || norm.includes('marque')) return 'brand-kit'
+  // Agent-id hints as a secondary signal.
+  if (agentId === 'market-analyst' || agentId === 'market') return 'scan'
+  if (agentId === 'builder') return 'landing'
+  if (agentId === 'growth') return 'acquisition'
+  return 'clarify-business-idea'
+}
 
 export type BackendMode = 'supabase' | 'local'
 
@@ -523,7 +564,30 @@ export function useAutarsBackend(): BackendApi {
           // will deliver the next transition.
           return
         }
-        const message = err instanceof Error ? err.message : 'Lancement de mission impossible.'
+        if (err instanceof AgentRunMissingApiKeyError) {
+          setState((prev) => ({
+            ...prev,
+            error: err.message,
+            missions: prev.missions.map((m) =>
+              m.id === missionId ? { ...m, status: 'en attente', progress: 0 } : m,
+            ),
+          }))
+          return
+        }
+        if (err instanceof AgentRunFailedError) {
+          setState((prev) => ({
+            ...prev,
+            error: err.message,
+            missions: prev.missions.map((m) =>
+              m.id === missionId
+                ? { ...m, status: 'en attente', progress: 0 }
+                : m,
+            ),
+          }))
+          return
+        }
+        const message =
+          err instanceof Error ? err.message : 'Lancement de mission impossible.'
         setState((prev) => ({
           ...prev,
           error: message,
@@ -548,6 +612,10 @@ export function useAutarsBackend(): BackendApi {
         const realAgentId = seedAgentLookup.get(payload.agentId) ?? payload.agentId
         const target =
           state.agents.find((a) => a.id === realAgentId) ?? state.agents[0]
+        // Map the mission title to one of the backend mission_type values
+        // so the agent runner picks the right system prompt + tool set
+        // (e.g. "Analyser mon marché" → 'scan', which enables web tools).
+        const missionType = resolveMissionType(payload.title, payload.agentId)
         try {
           const mission = await supabaseCreateMission({
             workspaceId: project.id,
@@ -556,7 +624,7 @@ export function useAutarsBackend(): BackendApi {
             title: payload.title,
             description: payload.description,
             costCredits: 1,
-            type: 'user_action',
+            type: missionType,
           })
           setState((prev) => ({
             ...prev,

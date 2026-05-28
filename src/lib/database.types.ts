@@ -24,6 +24,7 @@ export type ActivityEventType =
   | 'credits_consumed'
   | 'credits_insufficient'
   | 'credits_granted'
+  | 'credit_refunded'
   | 'agent_leveled_up'
   | 'run_queued'
   | 'run_started'
@@ -36,6 +37,7 @@ export type ActivityEventType =
   | 'deliverable_rejected'
   | 'decision_made'
   | 'next_mission_proposed'
+  | 'mission_fallback_used'
 
 export type SubscriptionStatus = 'active' | 'past_due' | 'canceled' | 'trialing'
 export type CreditTxType =

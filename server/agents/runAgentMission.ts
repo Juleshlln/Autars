@@ -306,30 +306,59 @@ async function actPhase(
   }
   let lastModel = cfg.model
 
+  // Anthropic's OpenAI-compatible endpoint rejects
+  // `response_format: { type: 'json_object' }` (it expects `json_schema`
+  // with an inline schema). The CLARIFY-style prompts are strict enough
+  // that the model returns valid JSON without the hint, so we only set
+  // response_format on providers we know accept the cheap form.
+  const supportsJsonObject =
+    cfg.provider === 'openai' ||
+    cfg.provider === 'ollama' ||
+    cfg.provider === 'custom'
+
   for (let iteration = 0; iteration <= maxIterations; iteration++) {
     const isLastIteration = iteration === maxIterations
-    // On the final iteration we drop the tools to force the model to
-    // produce its final answer instead of asking for yet another call.
-    const completion = await client.chat.completions.create({
-      model: cfg.model,
-      max_tokens: def.maxTokens,
-      temperature: def.outputFormat === 'json' ? 0.3 : 0.4,
-      ...(def.outputFormat === 'json' && !useTools
-        ? { response_format: { type: 'json_object' as const } }
-        : {}),
-      ...(useTools && !isLastIteration
-        ? {
-            tools: asOpenAITools(toolDefs),
-            tool_choice: 'auto' as const,
-          }
-        : {}),
-      // Note: the OpenAI types here are intentionally loose because we
-      // append `tool` and `assistant.tool_calls` messages between turns;
-      // the SDK accepts them at runtime regardless.
-      messages: messages as unknown as Parameters<
-        typeof client.chat.completions.create
-      >[0]['messages'],
-    })
+    let completion: Awaited<
+      ReturnType<typeof client.chat.completions.create>
+    >
+    try {
+      completion = await client.chat.completions.create({
+        model: cfg.model,
+        max_tokens: def.maxTokens,
+        temperature: def.outputFormat === 'json' ? 0.3 : 0.4,
+        ...(def.outputFormat === 'json' && !useTools && supportsJsonObject
+          ? { response_format: { type: 'json_object' as const } }
+          : {}),
+        // On the final iteration we keep the tool schemas in the
+        // payload (otherwise providers can't interpret the prior
+        // `tool` messages in history and may return empty content)
+        // but force `tool_choice: 'none'` so the model must answer.
+        ...(useTools
+          ? {
+              tools: asOpenAITools(toolDefs),
+              tool_choice: isLastIteration
+                ? ('none' as const)
+                : ('auto' as const),
+            }
+          : {}),
+        // Note: the OpenAI types here are intentionally loose because we
+        // append `tool` and `assistant.tool_calls` messages between turns;
+        // the SDK accepts them at runtime regardless.
+        messages: messages as unknown as Parameters<
+          typeof client.chat.completions.create
+        >[0]['messages'],
+      })
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      console.error(
+        `[runAgentMission.actPhase] LLM call failed at iter ${iteration}/${maxIterations}` +
+          ` (provider=${cfg.provider}, model=${cfg.model}, useTools=${useTools}, ` +
+          `messages=${messages.length}): ${detail}`,
+      )
+      throw new Error(
+        `llm_call_failed (iter=${iteration}, provider=${cfg.provider}): ${detail}`,
+      )
+    }
     lastModel = completion.model || lastModel
     addUsage(completion.usage)
 
@@ -362,8 +391,29 @@ async function actPhase(
       continue
     }
 
+    const raw = assistantMsg?.content ?? ''
+
+    // Anthropic occasionally returns an empty assistant message right
+    // after a tool-call turn — typically because we dropped `tools` or
+    // the conversation already contains the full answer. Nudge once
+    // with an explicit user message asking for the final deliverable.
+    if (!raw.trim() && !isLastIteration) {
+      messages.push({
+        role: 'assistant',
+        content: assistantMsg?.content ?? null,
+        tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+      })
+      messages.push({
+        role: 'user',
+        content:
+          'Tu as toutes les informations nécessaires. Produis MAINTENANT le livrable final demandé, ' +
+          'au format attendu (markdown complet OU JSON valide selon la mission). Pas d\'appel d\'outil supplémentaire.',
+      })
+      continue
+    }
+
     return {
-      raw: assistantMsg?.content ?? '',
+      raw,
       model: lastModel,
       usage: aggregateUsage,
     }
@@ -534,6 +584,17 @@ export async function runAgentMission(
   }
 
   if (!actRaw.trim()) {
+    // LLM returned nothing usable. NOT a hard failure: the orchestrator
+    // is expected to substitute a fallback deliverable so the user never
+    // loses the credit silently. We expose this as a distinct outcome.
+    console.error('[mission.run.empty]', {
+      provider: getLLMConfig().provider,
+      model,
+      workspaceId: ctx.workspaceId,
+      missionId: ctx.missionId,
+      missionType: def.missionType,
+      tokenUsage: aggregateUsage,
+    })
     return failure({
       def,
       ctx,

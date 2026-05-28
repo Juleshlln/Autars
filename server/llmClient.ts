@@ -40,17 +40,24 @@ export interface LLMConfig {
   provider: 'anthropic' | 'openai' | 'ollama' | 'custom'
 }
 
+export class MissingAiApiKeyError extends Error {
+  readonly code = 'missing_ai_api_key'
+  constructor() {
+    super(
+      'missing_ai_api_key: set LLM_API_KEY (or legacy ANTHROPIC_API_KEY) in the server environment.',
+    )
+    this.name = 'MissingAiApiKeyError'
+  }
+}
+
 export function getLLMConfig(): LLMConfig {
   const baseURL = process.env.LLM_BASE_URL ?? DEFAULT_BASE_URL
-  // Fall back to ANTHROPIC_API_KEY for legacy .env.local files.
   const apiKey =
     process.env.LLM_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? ''
   const model = process.env.LLM_MODEL ?? DEFAULT_MODEL
   const provider = detectProvider(baseURL)
   if (!apiKey && provider !== 'ollama') {
-    throw new Error(
-      'LLM_API_KEY (or legacy ANTHROPIC_API_KEY) missing on server',
-    )
+    throw new MissingAiApiKeyError()
   }
   return { baseURL, apiKey: apiKey || 'unused', model, provider }
 }
@@ -69,6 +76,10 @@ export function getLLM(): OpenAI {
   _client = new OpenAI({
     apiKey: cfg.apiKey,
     baseURL: cfg.baseURL,
+    // Long ceiling because tool-use turns occasionally take 60s+ on
+    // Anthropic. Two retries on transient `Connection error.` faults.
+    timeout: 180_000,
+    maxRetries: 2,
   })
   return _client
 }

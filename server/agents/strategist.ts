@@ -206,4 +206,8 @@ export const STRATEGIST_SCAN: AgentMissionDefinition = {
   maxTokens: 6000,
   enableWebSearch: true,
   enableWebFetch: true,
+  // Anthropic's OpenAI-compat endpoint currently hangs on multi-iteration
+  // tool loops; cap tool calls to a single round-trip until we switch to
+  // the native Anthropic SDK or to OpenAI proper.
+  maxToolIterations: 2,
 }

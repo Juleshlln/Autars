@@ -74,11 +74,32 @@ export class AgentRunAlreadyActiveError extends Error {
   }
 }
 
+export class AgentRunMissingApiKeyError extends Error {
+  constructor() {
+    super(
+      "Le service IA n'est pas configuré côté serveur. Le crédit n'a pas été débité.",
+    )
+    this.name = 'AgentRunMissingApiKeyError'
+  }
+}
+
+export class AgentRunFailedError extends Error {
+  readonly code: string
+  readonly refunded: boolean
+  constructor(code: string, friendly: string | null, refunded: boolean) {
+    super(friendly || code)
+    this.code = code
+    this.refunded = refunded
+    this.name = 'AgentRunFailedError'
+  }
+}
+
 export interface AgentRunResponse {
   ok: true
   runId: string
   deliverableId: string
   newBalance: number | null
+  usedFallback?: boolean
 }
 
 export async function startAgentRun(missionId: string): Promise<AgentRunResponse> {
@@ -95,7 +116,20 @@ export async function startAgentRun(missionId: string): Promise<AgentRunResponse
     )
   }
   if (status === 409) throw new AgentRunAlreadyActiveError()
-  throw new Error(errorPayload.error || `agent_run_failed_${status}`)
+  if (status === 503 && errorPayload.error === 'missing_ai_api_key') {
+    throw new AgentRunMissingApiKeyError()
+  }
+  const friendly =
+    typeof errorPayload.friendlyError === 'string'
+      ? errorPayload.friendlyError
+      : null
+  const refunded =
+    typeof errorPayload.refunded === 'boolean' ? errorPayload.refunded : false
+  throw new AgentRunFailedError(
+    errorPayload.error || `agent_run_failed_${status}`,
+    friendly,
+    refunded,
+  )
 }
 
 export interface AgentIterateResponse {

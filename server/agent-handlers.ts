@@ -19,6 +19,20 @@ import {
   type AgentExecutionResult,
   type AgentProgressEvent,
 } from './agents/runAgentMission'
+import {
+  generateMissionFallback,
+  humanizeErrorCode,
+  isRecoverableEmpty,
+  validateMissionResult,
+} from './agents/fallback'
+import { MissingAiApiKeyError, getLLMConfig } from './llmClient'
+
+// Wrap getLLMConfig so the pre-flight check in handleAgentRun is callable
+// without TS complaining about the void cast. Throws MissingAiApiKeyError
+// when the key is absent.
+function getLLMConfigSafe(): void {
+  getLLMConfig()
+}
 import { indexDeliverable, hasEmbeddings } from './memory'
 import type { AgentRunContext, RecommendedNextMission } from './agents/types'
 import {
@@ -30,9 +44,95 @@ import {
 } from './agents/schemas'
 
 // ---------------------------------------------------------------------
-// Failure helper — flips the run/mission/agent to terminal-failed state
-// and emits a `run_failed` activity event so the UI is never stuck in
-// `working` indefinitely.
+// Structured failure log — keep in one place so future hooks (Sentry,
+// Logflare, …) can attach. Never includes secrets.
+// ---------------------------------------------------------------------
+function logRunFailed(params: {
+  userId: string
+  workspaceId: string
+  missionId: string
+  runId: string | null
+  errorCode: string
+  errorMessage: string
+  model?: string | null
+  phase?: string | null
+}): void {
+  console.error('[mission.run.failed]', {
+    userId: params.userId,
+    workspaceId: params.workspaceId,
+    missionId: params.missionId,
+    runId: params.runId,
+    errorCode: params.errorCode,
+    errorMessage: params.errorMessage.slice(0, 500),
+    model: params.model ?? null,
+    phase: params.phase ?? null,
+  })
+}
+
+// ---------------------------------------------------------------------
+// refundCredits — best-effort. RPC enforces idempotency by (mission, reason)
+// within the last hour. Emits a `credit_refunded` activity_event so the
+// user sees the balance restored in real time.
+// ---------------------------------------------------------------------
+async function refundCredits(params: {
+  ownerId: string
+  workspaceId: string
+  agentId: string | null
+  missionId: string
+  missionTitle: string
+  amount: number
+  reason: string
+}): Promise<{ ok: boolean; newBalance: number | null }> {
+  const sb = admin()
+  const { data, error } = await sb.rpc('refund_credits', {
+    p_user_id: params.ownerId,
+    p_workspace_id: params.workspaceId,
+    p_mission_id: params.missionId,
+    p_amount: params.amount,
+    p_reason: params.reason,
+  })
+  if (error) {
+    console.error('[refund_credits.rpc_failed]', {
+      missionId: params.missionId,
+      error: error.message,
+    })
+    return { ok: false, newBalance: null }
+  }
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row?.ok) {
+    console.error('[refund_credits.rejected]', {
+      missionId: params.missionId,
+      error: row?.error ?? 'unknown',
+    })
+    return { ok: false, newBalance: row?.new_balance ?? null }
+  }
+  await sb
+    .from('activity_events')
+    .insert({
+      workspace_id: params.workspaceId,
+      owner_id: params.ownerId,
+      agent_id: params.agentId,
+      mission_id: params.missionId,
+      event_type: 'credit_refunded',
+      title: `+${params.amount} crédit${params.amount > 1 ? 's' : ''} remboursé${
+        params.amount > 1 ? 's' : ''
+      }`,
+      description: `Mission "${params.missionTitle}" — ${params.reason}`,
+      metadata: {
+        amount: params.amount,
+        new_balance: row.new_balance,
+        transaction_id: row.transaction_id,
+        reason: params.reason,
+      },
+    })
+    .then(undefined, () => undefined)
+  return { ok: true, newBalance: row.new_balance ?? null }
+}
+
+// ---------------------------------------------------------------------
+// Failure helper — flips the run/mission/agent to terminal-failed state,
+// refunds the credit (idempotent), and emits a `run_failed` activity
+// event so the UI is never stuck in `working` indefinitely.
 // ---------------------------------------------------------------------
 async function markRunFailed(params: {
   runId: string | null
@@ -42,14 +142,17 @@ async function markRunFailed(params: {
   agentId: string | null
   missionTitle: string
   error: string
+  costCredits?: number
+  refund?: boolean
 }) {
   const sb = admin()
+  const friendly = humanizeErrorCode(params.error)
   if (params.runId) {
     await sb
       .from('agent_runs')
       .update({
         status: 'failed',
-        error_message: params.error,
+        error_message: params.error.slice(0, 500),
         completed_at: new Date().toISOString(),
       })
       .eq('id', params.runId)
@@ -57,7 +160,10 @@ async function markRunFailed(params: {
   }
   await sb
     .from('missions')
-    .update({ status: 'failed' })
+    .update({
+      status: 'failed',
+      result: { error: params.error, friendly_error: friendly },
+    })
     .eq('id', params.missionId)
     .then(undefined, () => undefined)
   if (params.agentId) {
@@ -76,10 +182,22 @@ async function markRunFailed(params: {
       mission_id: params.missionId,
       event_type: 'run_failed',
       title: `Échec mission : ${params.missionTitle}`,
-      description: params.error.slice(0, 500),
-      metadata: { run_id: params.runId, error: params.error },
+      description: friendly,
+      metadata: { run_id: params.runId, error_code: params.error.split(':')[0] },
     })
     .then(undefined, () => undefined)
+
+  if (params.refund && params.costCredits && params.costCredits > 0) {
+    await refundCredits({
+      ownerId: params.ownerId,
+      workspaceId: params.workspaceId,
+      agentId: params.agentId,
+      missionId: params.missionId,
+      missionTitle: params.missionTitle,
+      amount: params.costCredits,
+      reason: `mission_failed:${params.error.split(':')[0]}`,
+    })
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -274,6 +392,7 @@ async function executeRun(params: {
   missionId: string
   missionTitle: string
   missionType: string | null
+  costCredits: number
   context: AgentRunContext
   previousDeliverableId?: string | null
 }): Promise<
@@ -281,9 +400,10 @@ async function executeRun(params: {
       ok: true
       runId: string
       deliverableId: string
+      usedFallback: boolean
       result: AgentExecutionResult
     }
-  | { ok: false; error: string }
+  | { ok: false; error: string; refunded: boolean }
 > {
   const sb = admin()
   let runId: string | null = null
@@ -304,7 +424,11 @@ async function executeRun(params: {
       .select('id')
       .single()
     if (runInsertError || !runRow) {
-      return { ok: false, error: runInsertError?.message ?? 'run_insert_failed' }
+      return {
+        ok: false,
+        error: runInsertError?.message ?? 'run_insert_failed',
+        refunded: false,
+      }
     }
     runId = runRow.id as string
 
@@ -358,34 +482,103 @@ async function executeRun(params: {
         metadata: { run_id: runId, phase: evt.phase },
       })
     }
-    const result = await runAgentMission(def, params.context, onProgress)
+    let result = await runAgentMission(def, params.context, onProgress)
+    let usedFallback = false
+    let fallbackReason: string | null = null
 
+    // Normalise the orchestrator outcome through three layers:
+    //   1. Hard failure (e.g. LLM exception) → refund + flip failed.
+    //   2. Recoverable empty / schema wobble → swap in a structured
+    //      fallback deliverable, keep the credit (the agent still ran),
+    //      flag `used_fallback=true` so the UI shows a banner.
+    //   3. Validation guard against "ok:true but empty content".
     if (!result.ok) {
-      await sb
-        .from('agent_runs')
-        .update({
-          status: 'failed',
-          error_message: result.error ?? 'unknown_error',
-          completed_at: new Date().toISOString(),
-          model: result.model,
-          token_usage: result.tokenUsage,
+      const code = result.error ?? 'unknown_error'
+      if (isRecoverableEmpty(code)) {
+        usedFallback = true
+        fallbackReason = code
+        const fb = generateMissionFallback({
+          def,
+          ctx: params.context,
+          reason: code,
         })
-        .eq('id', runId)
-      await sb.from('missions').update({ status: 'failed' }).eq('id', params.missionId)
-      if (params.agentId) {
-        await sb.from('agents').update({ status: 'idle' }).eq('id', params.agentId)
+        result = {
+          ok: true,
+          outputFormat: def.outputFormat,
+          title: fb.title,
+          summary: fb.summary,
+          structured: fb.structured,
+          content: fb.content,
+          recommendedNextMissions: Array.isArray(
+            (fb.structured as { recommended_next_missions?: unknown[] })
+              .recommended_next_missions,
+          )
+            ? ((fb.structured as { recommended_next_missions: unknown[] })
+                .recommended_next_missions as AgentExecutionResult['recommendedNextMissions'])
+            : [],
+          contextUpdates: undefined,
+          memoryItems: undefined,
+          model: result.model,
+          tokenUsage: result.tokenUsage,
+          phases: result.phases,
+        }
+      } else {
+        // Hard failure path — refund credit and flip everything to failed.
+        await sb
+          .from('agent_runs')
+          .update({
+            status: 'failed',
+            error_message: code.slice(0, 500),
+            completed_at: new Date().toISOString(),
+            model: result.model,
+            token_usage: result.tokenUsage,
+          })
+          .eq('id', runId)
+          .then(undefined, () => undefined)
+        logRunFailed({
+          userId: params.ownerId,
+          workspaceId: params.workspaceId,
+          missionId: params.missionId,
+          runId,
+          errorCode: code.split(':')[0] ?? code,
+          errorMessage: code,
+          model: result.model,
+        })
+        await markRunFailed({
+          runId,
+          missionId: params.missionId,
+          workspaceId: params.workspaceId,
+          ownerId: params.ownerId,
+          agentId: params.agentId,
+          missionTitle: params.missionTitle,
+          error: code,
+          costCredits: params.costCredits,
+          refund: true,
+        })
+        return { ok: false, error: code, refunded: true }
       }
-      await sb.from('activity_events').insert({
-        workspace_id: params.workspaceId,
-        owner_id: params.ownerId,
-        agent_id: params.agentId,
-        mission_id: params.missionId,
-        event_type: 'run_failed',
-        title: `Échec mission : ${params.missionTitle}`,
-        description: (result.error ?? '').slice(0, 500),
-        metadata: { run_id: runId, error: result.error ?? null },
+    }
+
+    // Late validation guard: the orchestrator sometimes returns ok:true
+    // with a borderline payload (e.g. JSON shape technically valid but
+    // content empty). Treat that as a recoverable empty.
+    const validation = validateMissionResult(result)
+    if (!validation.ok) {
+      usedFallback = true
+      fallbackReason = validation.errorCode
+      const fb = generateMissionFallback({
+        def,
+        ctx: params.context,
+        reason: validation.errorCode,
       })
-      return { ok: false, error: result.error ?? 'agent_failed' }
+      result = {
+        ...result,
+        ok: true,
+        title: fb.title,
+        summary: fb.summary,
+        structured: fb.structured,
+        content: fb.content,
+      }
     }
 
     // 5. Determine deliverable version (previous + 1 for same mission)
@@ -414,11 +607,23 @@ async function executeRun(params: {
         structured_content: result.structured,
         version: nextVersion,
         status: 'pending_validation',
+        metadata: usedFallback
+          ? { used_fallback: true, fallback_reason: fallbackReason }
+          : {},
       })
       .select('id')
       .single()
     if (deliverableError || !deliverable) {
-      const errMsg = deliverableError?.message ?? 'deliverable_insert_failed'
+      const errMsg = `deliverable_insert_failed:${deliverableError?.message ?? 'unknown'}`
+      logRunFailed({
+        userId: params.ownerId,
+        workspaceId: params.workspaceId,
+        missionId: params.missionId,
+        runId,
+        errorCode: 'deliverable_insert_failed',
+        errorMessage: deliverableError?.message ?? 'unknown',
+        model: result.model,
+      })
       await markRunFailed({
         runId,
         missionId: params.missionId,
@@ -427,8 +632,10 @@ async function executeRun(params: {
         agentId: params.agentId,
         missionTitle: params.missionTitle,
         error: errMsg,
+        costCredits: params.costCredits,
+        refund: true,
       })
-      return { ok: false, error: errMsg }
+      return { ok: false, error: errMsg, refunded: true }
     }
 
     // 7. Workspace context updates
@@ -516,6 +723,8 @@ async function executeRun(params: {
           summary: result.summary,
           deliverable_id: deliverable.id,
           agent_run_id: runId,
+          used_fallback: usedFallback,
+          fallback_reason: fallbackReason,
         },
       })
       .eq('id', params.missionId)
@@ -524,16 +733,22 @@ async function executeRun(params: {
       await sb.from('agents').update({ status: 'done' }).eq('id', params.agentId)
     }
 
-    await sb.from('activity_events').insert([
+    const completionEvents: Array<Record<string, unknown>> = [
       {
         workspace_id: params.workspaceId,
         owner_id: params.ownerId,
         agent_id: params.agentId,
         mission_id: params.missionId,
         event_type: 'run_completed',
-        title: `Agent a terminé : ${params.missionTitle}`,
+        title: usedFallback
+          ? `Mission terminée (version fallback) : ${params.missionTitle}`
+          : `Mission terminée : ${params.missionTitle}`,
         description: result.summary?.slice(0, 200) ?? null,
-        metadata: { run_id: runId, deliverable_id: deliverable.id },
+        metadata: {
+          run_id: runId,
+          deliverable_id: deliverable.id,
+          used_fallback: usedFallback,
+        },
       },
       {
         workspace_id: params.workspaceId,
@@ -543,17 +758,52 @@ async function executeRun(params: {
         event_type: 'deliverable_created',
         title: `Livrable prêt : ${result.title}`,
         description: result.summary?.slice(0, 200) ?? null,
-        metadata: { deliverable_id: deliverable.id, version: nextVersion },
+        metadata: {
+          deliverable_id: deliverable.id,
+          version: nextVersion,
+          used_fallback: usedFallback,
+        },
       },
-    ])
+    ]
+    if (usedFallback) {
+      completionEvents.push({
+        workspace_id: params.workspaceId,
+        owner_id: params.ownerId,
+        agent_id: params.agentId,
+        mission_id: params.missionId,
+        event_type: 'mission_fallback_used',
+        title: 'Livrable fallback généré',
+        description: humanizeErrorCode(fallbackReason ?? 'empty_completion'),
+        metadata: { reason: fallbackReason, deliverable_id: deliverable.id },
+      })
+    }
+    await sb.from('activity_events').insert(completionEvents)
 
-    return { ok: true, runId, deliverableId: deliverable.id, result }
+    return {
+      ok: true,
+      runId,
+      deliverableId: deliverable.id,
+      usedFallback,
+      result,
+    }
   } catch (err) {
     // Last-resort safety net. Any uncaught exception (LLM timeout, network
-    // error, supabase fault, JSON parse blowup) ends here. We flip every
-    // moving piece back to a terminal state so the UI doesn't get stuck
-    // showing an agent forever "working".
+    // error, supabase fault, JSON parse blowup) ends here. We refund the
+    // credit, flip every moving piece back to a terminal state so the UI
+    // doesn't get stuck showing an agent forever "working".
     const message = err instanceof Error ? err.message : String(err)
+    const code =
+      err instanceof MissingAiApiKeyError
+        ? 'missing_ai_api_key'
+        : 'unexpected_error'
+    logRunFailed({
+      userId: params.ownerId,
+      workspaceId: params.workspaceId,
+      missionId: params.missionId,
+      runId,
+      errorCode: code,
+      errorMessage: message,
+    })
     await markRunFailed({
       runId,
       missionId: params.missionId,
@@ -561,9 +811,11 @@ async function executeRun(params: {
       ownerId: params.ownerId,
       agentId: params.agentId,
       missionTitle: params.missionTitle,
-      error: `unexpected_error: ${message}`,
+      error: `${code}: ${message}`,
+      costCredits: params.costCredits,
+      refund: true,
     })
-    return { ok: false, error: message }
+    return { ok: false, error: code, refunded: true }
   }
 }
 
@@ -601,6 +853,39 @@ export const handleAgentRun: Handler = withSafety(async (req, res) => {
   }
   if (mission.status === 'completed') {
     return send(res, 409, { error: 'already_completed' })
+  }
+
+  // Pre-flight: refuse to debit a credit when the server is misconfigured.
+  // Anything that throws here means the LLM call cannot possibly succeed,
+  // so we abort BEFORE consume_credits.
+  try {
+    void resolveAgentMission(mission.type)
+    void getLLMConfigSafe()
+  } catch (err) {
+    const code = err instanceof MissingAiApiKeyError ? 'missing_ai_api_key' : 'config_error'
+    const message = err instanceof Error ? err.message : String(err)
+    logRunFailed({
+      userId: ownerId,
+      workspaceId: mission.workspace_id,
+      missionId: mission.id,
+      runId: null,
+      errorCode: code,
+      errorMessage: message,
+    })
+    await sb
+      .from('activity_events')
+      .insert({
+        workspace_id: mission.workspace_id,
+        owner_id: ownerId,
+        agent_id: mission.agent_id,
+        mission_id: mission.id,
+        event_type: 'run_failed',
+        title: `Échec mission : ${mission.title}`,
+        description: humanizeErrorCode(code),
+        metadata: { error_code: code },
+      })
+      .then(undefined, () => undefined)
+    return send(res, 503, { error: code, detail: message })
   }
 
   // 1. Consume credits via RPC (transactional)
@@ -654,14 +939,26 @@ export const handleAgentRun: Handler = withSafety(async (req, res) => {
     agent_id: mission.agent_id,
     mission_id: mission.id,
     event_type: 'mission_started',
-    title: `Mission "${mission.title}" lancée`,
+    title: `Mission lancée : ${mission.title}`,
     description: `Coût : ${consumeAmount} crédit${consumeAmount > 1 ? 's' : ''}.`,
     metadata: { cost_credits: consumeAmount },
   })
 
   // 2. Build context + execute
   const ctxOrError = await loadRunContext({ missionId: mission.id, ownerId })
-  if ('error' in ctxOrError) return send(res, 400, { error: ctxOrError.error })
+  if ('error' in ctxOrError) {
+    // Pre-execution validation failure (e.g. workspace missing). Refund.
+    await refundCredits({
+      ownerId,
+      workspaceId: mission.workspace_id,
+      agentId: mission.agent_id,
+      missionId: mission.id,
+      missionTitle: mission.title,
+      amount: consumeAmount,
+      reason: `mission_failed:${ctxOrError.error}`,
+    })
+    return send(res, 400, { error: ctxOrError.error })
+  }
 
   const execution = await executeRun({
     ownerId,
@@ -670,15 +967,23 @@ export const handleAgentRun: Handler = withSafety(async (req, res) => {
     missionId: mission.id,
     missionTitle: mission.title,
     missionType: mission.type,
+    costCredits: consumeAmount,
     context: ctxOrError,
   })
 
-  if (!execution.ok) return send(res, 502, { error: execution.error })
+  if (!execution.ok) {
+    return send(res, 502, {
+      error: execution.error,
+      refunded: execution.refunded,
+      friendlyError: humanizeErrorCode(execution.error),
+    })
+  }
 
   return send(res, 200, {
     ok: true,
     runId: execution.runId,
     deliverableId: execution.deliverableId,
+    usedFallback: execution.usedFallback,
     newBalance: consume.new_balance,
   })
 })
@@ -754,6 +1059,8 @@ export const handleAgentIterate: Handler = withSafety(async (req, res) => {
   })
   if ('error' in ctxOrError) return send(res, 400, { error: ctxOrError.error })
 
+  // Iteration: no credit consumed at this layer (consume happened during
+  // the initial run). costCredits=0 keeps refund attempts no-op.
   const execution = await executeRun({
     ownerId,
     workspaceId: mission.workspace_id,
@@ -761,16 +1068,23 @@ export const handleAgentIterate: Handler = withSafety(async (req, res) => {
     missionId: mission.id,
     missionTitle: mission.title,
     missionType: mission.type,
+    costCredits: 0,
     context: ctxOrError,
     previousDeliverableId: deliverable.id,
   })
 
-  if (!execution.ok) return send(res, 502, { error: execution.error })
+  if (!execution.ok) {
+    return send(res, 502, {
+      error: execution.error,
+      friendlyError: humanizeErrorCode(execution.error),
+    })
+  }
 
   return send(res, 200, {
     ok: true,
     runId: execution.runId,
     deliverableId: execution.deliverableId,
+    usedFallback: execution.usedFallback,
   })
 })
 
