@@ -33,20 +33,27 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
 
 ## 2. Migrations Supabase
 
-- [x] `supabase/migrations/001…011` présentes et **ordonnées**.
+- [x] `supabase/migrations/001…012` présentes et **ordonnées**.
 - [x] `010_hq_runtime.sql` recapturé (était appliqué en prod mais absent du repo).
-- [x] `011_hq_xp.sql` ajouté (RPC `award_hq_xp` — XP du QG, à appliquer en prod).
+- [x] `011_hq_xp.sql` **recapturé pour matcher la prod** : `award_hq_xp` existait
+      déjà en prod en `(uuid,uuid,integer,text)` avec seuil **`level*250`** (les
+      agents = `level*100`). Le fichier reproduit exactement cette définition —
+      **ne pas** appliquer une version 3-arg (créerait une surcharge ambiguë).
+- [x] `012_security_hardening.sql` — **appliqué en prod** (sous-ensemble sûr :
+      `search_path` pinné sur `set_updated_at`/`match_memories`, EXECUTE révoqué
+      sur les fonctions trigger `handle_new_user`/`handle_new_workspace`).
 - [x] Toutes les RPC utilisées par le backend existent dans les migrations :
       `consume_credits`, `refund_credits`, `award_mission_xp`, `award_hq_xp`,
       `create_mission_from_recommendation`, `match_memories`,
       `grant_initial_credits`, `handle_new_user`, `handle_new_workspace`.
+- [x] **Base existante** (`qpdcnyvvuyyucpzgbotw`) : vérifiée — tous les objets
+      010 présents + `award_hq_xp` déjà là. **Aucune migration 010/011 à
+      appliquer** (déjà en prod) ; seul `012` a été appliqué.
 - [ ] **Fresh deploy** : sur une base neuve, `supabase db push` applique
-      001→010 sans erreur (les migrations sont idempotentes). À tester sur un
-      projet jetable avant prod.
-- [ ] **Base existante** (`qpdcnyvvuyyucpzgbotw`) : déjà alignée — `010_hq_runtime`
-      est dans l'historique ; ré-appliquer le repo serait un no-op idempotent.
-      L'historique ne trace pas 001→009 (appliquées hors `supabase migration`) ;
-      pas bloquant car idempotent, mais à régulariser avec `supabase migration repair`.
+      001→012 sans erreur (migrations idempotentes). À tester sur un projet
+      jetable avant prod.
+- [ ] Régulariser l'historique 001→009 (appliquées hors `supabase migration`)
+      via `supabase migration repair` si besoin.
 
 ## 3. Build & qualité
 
@@ -62,9 +69,23 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
 - [x] Écritures sensibles via service-role serveur uniquement.
 - [x] RLS owner-scoped versionnée pour les 3 tables recapturées
       (`mission_steps`, `tool_calls`, `hq_metrics`) dans `010`.
-- [ ] Lancer `get_advisors` (security + performance) sur le projet et traiter
-      les éventuels avertissements (non re-testé : connecteur MCP instable
-      pendant l'audit).
+- [x] `get_advisors(security)` lancé. **Aucune erreur critique** ; uniquement
+      des `WARN`. Traité :
+      - ✅ `function_search_path_mutable` sur `set_updated_at` + `match_memories`
+        → corrigé (migration `012`).
+      - ✅ `anon`/`authenticated` peuvent exécuter `handle_new_user` /
+        `handle_new_workspace` (fonctions trigger) → EXECUTE révoqué (`012`).
+- [ ] **Recommandé (non fait — nécessite un test live)** : révoquer l'EXECUTE
+      `anon`/`public` sur les RPC métier SECURITY DEFINER (`consume_credits`,
+      `refund_credits`, `award_mission_xp`, `award_hq_xp`,
+      `create_mission_from_recommendation`, `recompute_business_readiness`,
+      `unlock_dependent_missions`), en gardant `authenticated` + `service_role`.
+      Non appliqué d'office car ces RPC sont sur le chemin critique (débit
+      crédits) — à dérouler avec un test end-to-end. Risque actuel : faible
+      (les fonctions ont un contrôle de propriété interne).
+- [ ] **Réglages dashboard** (hors SQL) : activer *Leaked Password Protection*
+      (Auth) ; envisager de déplacer l'extension `vector` hors du schéma `public`
+      (avertissements `WARN` restants).
 
 ## 5. Tests manuels (à exécuter avec une clé LLM réelle configurée)
 

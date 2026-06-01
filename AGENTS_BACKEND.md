@@ -140,14 +140,17 @@ L'utilisateur peut alors, depuis l'UI :
   la RPC `award_mission_xp(user, agent, xp)` (idempotent via `missions.xp_awarded`).
   La RPC met à jour `agents.xp` et recalcule le niveau ; un dépassement émet un
   event `agent_leveled_up`.
-- **Niveaux** : formule progressive centralisée côté DB (RPC `award_mission_xp`).
+- **Niveaux (agents)** : formule à seuil roulant côté DB (`award_mission_xp`) :
+  passer au niveau L+1 coûte **`L * 100`** XP, le surplus est reporté.
 - L'XP n'est pas qu'un badge visuel : il est persisté et conditionne le niveau
   (et, à terme, le déblocage de missions/skins).
 
 - **XP QG (workspace)** : à la même validation, `handleAgentDecide` appelle
-  aussi la RPC `award_hq_xp(user, workspace, xp)` (migration `011`), qui
-  applique la **même formule** que l'agent sur `workspaces.xp/level` et émet un
-  event `hq_leveled_up` (« QG passe niveau X », visible dans le flux d'activité).
+  aussi la RPC `award_hq_xp(user, workspace, xp)`, qui met à jour
+  `workspaces.xp/level` et émet un event `hq_leveled_up` (« QG passe niveau X »,
+  visible dans le flux). Même logique roulante mais seuil **`L * 250`** (le QG
+  monte plus lentement que les agents). `src/lib/gamification/xp.ts` centralise
+  les deux barèmes (`agent`=100, `hq`=250) pour que l'affichage colle à la DB.
   Les deux attributions sont idempotentes (verrou `missions.xp_awarded`) et
   best-effort (un échec ne casse jamais la validation).
 

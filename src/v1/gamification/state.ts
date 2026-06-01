@@ -267,10 +267,10 @@ export function useGamification(
   const xp = realHq ? realHq.xp : persisted.xp
   const xpForCurrentLevel = realHq ? 0 : hqLevel.xpRequired
   const xpForNextLevel = realHq
-    ? getXpForNextLevel(realHq.level)
+    ? getXpForNextLevel(realHq.level, 'hq')
     : (nextLevel?.xpRequired ?? null)
   const xpProgressInLevel = realHq
-    ? Math.round(levelProgress(realHq.xp, realHq.level) * 100)
+    ? Math.round(levelProgress(realHq.xp, realHq.level, 'hq') * 100)
     : xpForNextLevel
       ? Math.min(
           100,
