@@ -32,6 +32,11 @@ export interface Project {
   projectType: ProjectType
   mainGoal: MainGoal
   createdAt: string
+  // QG progression — real values from `workspaces` (Supabase mode). Default
+  // to 1/0/0 in local/demo mode.
+  level: number
+  xp: number
+  businessScore: number
 }
 
 export interface Agent {

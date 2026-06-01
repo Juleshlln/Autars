@@ -123,6 +123,9 @@ export function workspaceToProject(row: WorkspaceRow): Project {
     projectType: meta.projectType ?? 'Startup',
     mainGoal: meta.mainGoal ?? 'Clarifier mon idée',
     createdAt: row.created_at,
+    level: row.level ?? 1,
+    xp: row.xp ?? 0,
+    businessScore: row.business_score ?? 0,
   }
 }
 

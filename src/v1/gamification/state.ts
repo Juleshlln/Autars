@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { badges as seedBadges, gamAgents, gamMissions, hqLevels, skins as seedSkins } from './data'
+import { getXpForNextLevel, levelProgress } from '../../lib/gamification/xp'
 import type {
   Badge,
   DimensionScore,
@@ -82,6 +83,15 @@ function nextHQLevel(currentLevel: number): HQLevel | null {
   return hqLevels.find((l) => l.level === currentLevel + 1) ?? null
 }
 
+// Descriptor (name/features) for a real backend level. Clamps to the last
+// defined tier when the QG level exceeds the seeded `hqLevels` table.
+function hqLevelDescriptor(level: number): HQLevel {
+  const exact = hqLevels.find((l) => l.level === level)
+  if (exact) return exact
+  const last = hqLevels[hqLevels.length - 1]
+  return level > last.level ? { ...last, level } : hqLevels[0]
+}
+
 function xpForAgentLevel(level: number) {
   return [0, 100, 250, 500, 900, 1500][Math.min(level - 1, 5)] ?? 1500
 }
@@ -125,7 +135,10 @@ export interface GamificationApi {
   resetProgress: () => void
 }
 
-export function useGamification(projectId: string): GamificationApi {
+export function useGamification(
+  projectId: string,
+  realHq?: { level: number; xp: number },
+): GamificationApi {
   const [persisted, setPersisted] = useState<PersistedState>(() => loadPersisted(projectId))
 
   // Reload persisted state when the active project changes. This is React's
@@ -141,20 +154,28 @@ export function useGamification(projectId: string): GamificationApi {
     savePersisted(projectId, persisted)
   }, [projectId, persisted])
 
-  const hqLevel = useMemo(() => computeHQLevel(persisted.xp), [persisted.xp])
-  const nextLevel = useMemo(() => nextHQLevel(hqLevel.level), [hqLevel.level])
+  // Local mini-game level — drives mission/badge/skin gating (unchanged).
+  const localHqLevel = useMemo(() => computeHQLevel(persisted.xp), [persisted.xp])
+
+  // Headline level/XP: in Supabase mode it reflects the REAL backend QG
+  // progression (workspaces.level/xp); in local/demo mode it falls back to the
+  // local mini-game progression so the offline experience is unchanged.
+  const hqLevel: HQLevel = realHq ? hqLevelDescriptor(realHq.level) : localHqLevel
+  const nextLevel: HQLevel | null = nextHQLevel(
+    realHq ? realHq.level : localHqLevel.level,
+  )
 
   const missions = useMemo<GamMission[]>(
     () =>
       gamMissions.map((mission) => {
         const stored = persisted.missions[mission.id] ?? mission.status
         const finalStatus: GamMission['status'] =
-          stored === 'available' && hqLevel.level < mission.hqLevelRequired
+          stored === 'available' && localHqLevel.level < mission.hqLevelRequired
             ? 'locked'
             : stored
         return { ...mission, status: finalStatus }
       }),
-    [persisted.missions, hqLevel.level],
+    [persisted.missions, localHqLevel.level],
   )
 
   const badges = useMemo<Badge[]>(
@@ -243,16 +264,21 @@ export function useGamification(projectId: string): GamificationApi {
     return Math.round(sum / dimensionScores.length)
   }, [dimensionScores])
 
-  const xpForCurrentLevel = hqLevel.xpRequired
-  const xpForNextLevel = nextLevel?.xpRequired ?? null
-  const xpProgressInLevel = xpForNextLevel
-    ? Math.min(
-        100,
-        Math.round(
-          ((persisted.xp - xpForCurrentLevel) / (xpForNextLevel - xpForCurrentLevel)) * 100,
-        ),
-      )
-    : 100
+  const xp = realHq ? realHq.xp : persisted.xp
+  const xpForCurrentLevel = realHq ? 0 : hqLevel.xpRequired
+  const xpForNextLevel = realHq
+    ? getXpForNextLevel(realHq.level)
+    : (nextLevel?.xpRequired ?? null)
+  const xpProgressInLevel = realHq
+    ? Math.round(levelProgress(realHq.xp, realHq.level) * 100)
+    : xpForNextLevel
+      ? Math.min(
+          100,
+          Math.round(
+            ((persisted.xp - xpForCurrentLevel) / (xpForNextLevel - xpForCurrentLevel)) * 100,
+          ),
+        )
+      : 100
 
   const nextBestMission = useMemo<GamMission | null>(() => {
     const available = missions.find((m) => m.status === 'available' && m.hqLevelRequired <= hqLevel.level)
@@ -352,7 +378,7 @@ export function useGamification(projectId: string): GamificationApi {
   return {
     hqLevel,
     nextLevel,
-    xp: persisted.xp,
+    xp,
     xpForCurrentLevel,
     xpForNextLevel,
     xpProgressInLevel,

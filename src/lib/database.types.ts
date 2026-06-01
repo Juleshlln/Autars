@@ -71,6 +71,9 @@ export type WorkspaceRow = {
   stage: string
   created_at: string
   updated_at: string
+  level: number
+  xp: number
+  business_score: number
 }
 
 export type AgentRow = {

@@ -1021,7 +1021,12 @@ function DashboardPage({
   const monitorRef = useRef<HTMLDivElement>(null)
   const lastDeliveredRef = useRef(0)
 
-  const gamification = useGamification(project.id)
+  // In Supabase mode the QG headline level/XP comes from the real backend
+  // (workspaces.level/xp); local/demo mode keeps the offline mini-game XP.
+  const gamification = useGamification(
+    project.id,
+    isSupabaseConfigured ? { level: project.level, xp: project.xp } : undefined,
+  )
 
   const liveAgents = useMemo(
     () =>

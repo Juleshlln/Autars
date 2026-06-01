@@ -96,9 +96,14 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
 
 - [x] **XP QG** : attribué via `award_hq_xp` à la validation (migration `011`),
       persisté dans `workspaces.xp/level`, event `hq_leveled_up` dans le flux.
-  - [ ] Reste : appliquer la migration `011` en prod + brancher l'affichage du
-        niveau QG (panneau gamifié) sur `workspaces.xp/level` plutôt que sur
-        l'XP local de `src/v1/gamification`.
+      L'en-tête QG (niveau + barre d'XP) lit désormais ces valeurs **réelles**
+      en mode Supabase ; `src/lib/gamification/xp.ts` centralise la formule
+      (mêmes seuils `level*100` que les RPC). Le mode local garde son XP de démo.
+  - [ ] Reste : appliquer la migration `011` en prod.
+  - [ ] Reste (optionnel) : le mini-jeu gamifié (missions/badges/skins du
+        panneau `src/v1/gamification`) garde sa progression **locale** — à
+        réconcilier avec les missions/livrables réels si on veut une source
+        unique (cf. §7).
 - [ ] **Déploiement `/api/agents/*`** hors middleware Vite (cf. §1).
 - [ ] **Régulariser l'historique migrations** (`supabase migration repair`).
 - [ ] **Tests manuels A/B/C** à dérouler avec clé LLM réelle.
@@ -118,3 +123,8 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
   multi-itérations (`maxToolIterations` plafonné). Les autres missions sont en
   génération déterministe sans outil (fiables).
 - **Couplage front ↔ middleware Vite** pour les appels IA (cf. §1).
+- **Deux systèmes de missions coexistent** : les missions/livrables **réels**
+  (backend `useAutarsBackend`, source de vérité) et le **mini-jeu** gamifié
+  visuel (`src/v1/gamification`, localStorage : missions/badges/skins). Le
+  niveau QG de l'en-tête est désormais réel ; le reste du panneau gamifié reste
+  un overlay visuel. À fusionner si on veut une seule source de progression.

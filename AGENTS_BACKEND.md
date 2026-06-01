@@ -151,9 +151,10 @@ L'utilisateur peut alors, depuis l'UI :
   Les deux attributions sont idempotentes (verrou `missions.xp_awarded`) et
   best-effort (un échec ne casse jamais la validation).
 
-> Reste à faire (V1) : brancher l'affichage du niveau QG de l'UI gamifiée sur
-> `workspaces.xp/level` (aujourd'hui le panneau visuel a son propre XP local).
-> Voir PRODUCTION_CHECKLIST « points non terminés ».
+- **Affichage** : l'en-tête QG (niveau + barre d'XP) lit ces valeurs réelles en
+  mode Supabase via `src/lib/gamification/xp.ts` (formule centralisée, alignée
+  sur les RPC). Le mini-jeu gamifié (missions/badges/skins) garde une
+  progression locale séparée — cf. PRODUCTION_CHECKLIST « risques connus ».
 
 ---
 
