@@ -3700,3 +3700,46 @@ button.gam-skin-card { font-family: inherit; }
   border-top-color: rgba(255, 255, 255, 0.08);
 }
 [data-theme='dark'] .reco-tags em { background: rgba(255, 255, 255, 0.08); }
+
+/* ---- Roadmap: real "agent at work" indicator (was a fake "mark done") ---- */
+.gam-mission-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6c6ce3;
+  opacity: 0.85;
+}
+
+/* ---- "Bientôt disponible" overlay for still-cosmetic gamification panels ---- */
+.coming-soon-wrap {
+  position: relative;
+  isolation: isolate;
+}
+.coming-soon-wrap .coming-soon-content {
+  opacity: 0.45;
+  filter: grayscale(0.35);
+  pointer-events: none;
+  user-select: none;
+}
+.coming-soon-ribbon {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(108, 108, 227, 0.92);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow: 0 6px 18px rgba(20, 20, 40, 0.22);
+}
+[data-theme='dark'] .coming-soon-ribbon {
+  background: rgba(124, 124, 240, 0.9);
+}

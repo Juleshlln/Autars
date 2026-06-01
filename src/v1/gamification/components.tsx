@@ -268,13 +268,11 @@ export function MissionsRoadmap({
   missions,
   agents,
   onStart,
-  onComplete,
   onValidate,
 }: {
   missions: GamMission[]
   agents: GamAgent[]
   onStart: (id: string) => void
-  onComplete: (id: string) => void
   onValidate: (id: string) => void
 }) {
   return (
@@ -333,9 +331,9 @@ export function MissionsRoadmap({
                   </button>
                 )}
                 {mission.status === 'in_progress' && (
-                  <button type="button" onClick={() => onComplete(mission.id)}>
-                    <CircleCheck size={13} /> Marquer terminée
-                  </button>
+                  <span className="gam-mission-working">
+                    <CircleCheck size={13} /> Agent au travail…
+                  </span>
                 )}
                 {mission.status === 'completed' && (
                   <button type="button" className="gam-validate-btn" onClick={() => onValidate(mission.id)}>

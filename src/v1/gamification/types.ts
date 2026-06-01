@@ -1,14 +1,8 @@
-export type GamAgentId =
-  | 'strategist'
-  | 'market'
-  | 'branding'
-  | 'product'
-  | 'pricing'
-  | 'landing'
-  | 'acquisition'
-  | 'sales'
-  | 'content'
-  | 'analytics'
+// Real backend agents use UUIDs, so this is a free-form string. The legacy
+// hardcoded mini-game data uses these stable keys: strategist | market |
+// branding | product | pricing | landing | acquisition | sales | content |
+// analytics.
+export type GamAgentId = string
 
 export type GamAgentStatus =
   | 'idle'

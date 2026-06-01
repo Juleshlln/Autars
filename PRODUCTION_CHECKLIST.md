@@ -113,18 +113,17 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
 
 - **Redondance mémoire** : `agent_memory` (court terme) et `agent_memories`
   (RAG pgvector) coexistent — voulu, mais à documenter pour l'équipe.
-- **Code legacy non monté** : `src/screens.tsx`, `src/components.tsx`,
-  `src/App.tsx`, `src/hq/*`, `src/state.ts` ne sont pas atteints par `main.tsx`.
-  Inoffensifs (le build les ignore via tree-shaking) mais à nettoyer pour
-  réduire la confusion. **Attention** : `src/game/store.ts` EST utilisé par
-  l'app (animation) — ne pas supprimer.
+- **Code legacy** : supprimé (36 fichiers d'anciennes itérations retirés après
+  analyse de reachability). `src/game/store.ts`/`PixiCanvas` restent (animation).
 - **Outils web des agents** : `scan`/`positioning` utilisent des outils web ;
   l'endpoint Anthropic OpenAI-compat peut être instable sur des boucles d'outils
   multi-itérations (`maxToolIterations` plafonné). Les autres missions sont en
   génération déterministe sans outil (fiables).
 - **Couplage front ↔ middleware Vite** pour les appels IA (cf. §1).
-- **Deux systèmes de missions coexistent** : les missions/livrables **réels**
-  (backend `useAutarsBackend`, source de vérité) et le **mini-jeu** gamifié
-  visuel (`src/v1/gamification`, localStorage : missions/badges/skins). Le
-  niveau QG de l'en-tête est désormais réel ; le reste du panneau gamifié reste
-  un overlay visuel. À fusionner si on veut une seule source de progression.
+- **Fusion missions faite** : le roadmap gamifié + la carte « Mission
+  recommandée » sont alimentés par les **vraies** missions backend (via
+  `src/v1/gamification/adapter.ts`) et déclenchent les vraies actions (lancer /
+  valider). La liste détaillée « Missions en cours » est conservée (vue détail).
+  Restent **cosmétiques** (localStorage) mais affichés et marqués « Bientôt
+  disponible » : badges, skins, business score, grille d'agents gamifiée — à
+  brancher sur le réel dans une itération ultérieure.

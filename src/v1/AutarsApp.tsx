@@ -70,7 +70,10 @@ import {
   HQProgressHeader,
   MissionsRoadmap,
   NextBestMission,
+  pickNextBestMission,
   SkinsPanel,
+  toGamAgents,
+  toGamMissions,
   useGamification,
 } from './gamification'
 import './autars.css'
@@ -1041,6 +1044,23 @@ function DashboardPage({
 
   useDashboardAgentsInQG(project, liveAgents, missions)
 
+  // ---- Fusion: the gamified roadmap is now a visual overlay of the REAL
+  // backend missions (single source of truth), not a localStorage mini-game.
+  const gamRoadmapMissions = useMemo(
+    () => toGamMissions(missions, latestDeliverableByMission),
+    [missions, latestDeliverableByMission],
+  )
+  const gamRoadmapAgents = useMemo(() => toGamAgents(liveAgents), [liveAgents])
+  const recommendedMission = useMemo(
+    () => pickNextBestMission(gamRoadmapMissions),
+    [gamRoadmapMissions],
+  )
+  const handleRoadmapStart = (missionId: string) => void onRunMission(missionId)
+  const handleRoadmapValidate = (missionId: string) => {
+    const deliverable = latestDeliverableByMission.get(missionId)
+    if (deliverable) void onValidateDeliverable(deliverable.id)
+  }
+
   const qgStats = useMemo(() => {
     const working = liveAgents.filter((agent) => agent.status === 'travaille').length
     const delivered = missions.filter((mission) => mission.status === 'terminee').length
@@ -1262,16 +1282,15 @@ function DashboardPage({
       <section className="dashboard-layout">
         <div className="dashboard-main-column">
           <NextBestMission
-            mission={gamification.nextBestMission}
-            onStart={gamification.startMission}
+            mission={recommendedMission}
+            onStart={handleRoadmapStart}
           />
 
           <MissionsRoadmap
-            missions={gamification.missions}
-            agents={gamification.agents}
-            onStart={gamification.startMission}
-            onComplete={gamification.completeMission}
-            onValidate={gamification.validateMission}
+            missions={gamRoadmapMissions}
+            agents={gamRoadmapAgents}
+            onStart={handleRoadmapStart}
+            onValidate={handleRoadmapValidate}
           />
 
           <DashboardSection
@@ -1415,17 +1434,21 @@ function DashboardPage({
             </div>
           </DashboardSection>
 
-          <AgentsGamificationGrid
-            agents={gamification.agents}
-            skins={gamification.skins}
-            onSelectSkin={gamification.selectAgentSkin}
-          />
+          <ComingSoon>
+            <AgentsGamificationGrid
+              agents={gamification.agents}
+              skins={gamification.skins}
+              onSelectSkin={gamification.selectAgentSkin}
+            />
+          </ComingSoon>
 
           <NetworkConsoleSection />
         </div>
 
         <aside className="dashboard-side-column">
-          <BusinessScoreCard scores={gamification.dimensionScores} />
+          <ComingSoon>
+            <BusinessScoreCard scores={gamification.dimensionScores} />
+          </ComingSoon>
           <DashboardSection title="Actions rapides" subtitle="Lancez une mission simple.">
             <div className="quick-action-list">
               {quickActions.map((action) => (
@@ -1440,7 +1463,9 @@ function DashboardPage({
             <ActivityFeedSection events={activity} />
           )}
           <InfrastructureSection />
-          <BusinessBadges badges={gamification.badges} />
+          <ComingSoon>
+            <BusinessBadges badges={gamification.badges} />
+          </ComingSoon>
           <DashboardSection title="Décisions à valider" subtitle="Contrôle fondateur.">
             <div className="decision-list">
               <div>
@@ -1460,13 +1485,15 @@ function DashboardPage({
         </aside>
       </section>
 
-      <SkinsPanel
-        skins={gamification.skins}
-        agents={gamification.agents}
-        activeHQSkinId={gamification.activeHQSkinId}
-        hqLevel={gamification.hqLevel}
-        onSelectHQSkin={gamification.selectHQSkin}
-      />
+      <ComingSoon>
+        <SkinsPanel
+          skins={gamification.skins}
+          agents={gamification.agents}
+          activeHQSkinId={gamification.activeHQSkinId}
+          hqLevel={gamification.hqLevel}
+          onSelectHQSkin={gamification.selectHQSkin}
+        />
+      </ComingSoon>
 
       {modal && (
         <div className="modal-backdrop" role="presentation" onClick={() => setModal(null)}>
@@ -1755,6 +1782,22 @@ function SectionIntro({
       <span className="section-eyebrow">{eyebrow}</span>
       <h2>{title}</h2>
       <p>{text}</p>
+    </div>
+  )
+}
+
+// Visual overlay marking a still-cosmetic gamification panel (badges, skins,
+// business score) as "coming soon" — kept on screen but dimmed + inert so it
+// never reads as real, backend-driven data.
+function ComingSoon({ children }: { children: ReactNode }) {
+  return (
+    <div className="coming-soon-wrap">
+      <span className="coming-soon-ribbon">
+        Bientôt disponible · en cours de développement
+      </span>
+      <div className="coming-soon-content" aria-hidden="true">
+        {children}
+      </div>
     </div>
   )
 }
