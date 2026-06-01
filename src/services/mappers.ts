@@ -20,7 +20,9 @@ import type {
 // ---- agent status ----
 const dbToUiStatus: Record<AgentDbStatus, AgentStatus> = {
   idle: 'en attente',
+  thinking: 'travaille',
   working: 'travaille',
+  waiting_validation: 'actif',
   blocked: 'en attente',
   done: 'actif',
 }

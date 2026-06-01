@@ -85,6 +85,16 @@ function resolveMissionType(
   if (norm.includes('proposition de valeur') || norm.includes('value prop')) {
     return 'value-prop'
   }
+  if (norm.includes('pricing') || norm.includes('prix') || norm.includes('tarif')) {
+    return 'pricing'
+  }
+  if (norm.includes('business model') || norm.includes('modele economique')) {
+    return 'business-model'
+  }
+  if (norm.includes('roadmap') || norm.includes('mvp')) return 'roadmap'
+  if (norm.includes('contenu') || norm.includes('editorial') || norm.includes('content')) {
+    return 'content-plan'
+  }
   if (norm.includes('offre') || norm.includes('offer')) return 'offer'
   if (norm.includes('landing') || norm.includes('page')) return 'landing'
   if (norm.includes('acquisition') || norm.includes('canaux')) return 'acquisition'
@@ -180,8 +190,11 @@ export function useAutarsBackend(): BackendApi {
     })
   }, [mode, state.user, state.project, state.agents, state.missions])
 
-  // Local mock progress ticker (kept for parity with the previous behavior).
+  // Local-only progress ticker: a cosmetic bar bump for the offline/demo
+  // experience. In Supabase mode the real progress comes from activity
+  // events + mission status flips, so we must NOT run a fake ticker there.
   useEffect(() => {
+    if (mode !== 'local') return
     const interval = window.setInterval(() => {
       setState((current) => ({
         ...current,
@@ -192,7 +205,7 @@ export function useAutarsBackend(): BackendApi {
       }))
     }, 4200)
     return () => window.clearInterval(interval)
-  }, [])
+  }, [mode])
 
   // ---- Supabase: hydrate everything for a given user ----
   const hydrate = useCallback(async (user: AuthUser) => {

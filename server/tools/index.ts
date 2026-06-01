@@ -461,7 +461,7 @@ export async function executeToolCalls(
 
     // Cap the content sent back to the LLM. Tool outputs can be huge
     // (a 40k-char scrape) and the next turn pays for every char.
-    let serialised = ''
+    let serialised: string
     try {
       serialised = JSON.stringify(result)
     } catch {

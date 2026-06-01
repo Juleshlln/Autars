@@ -128,9 +128,14 @@ export interface GamificationApi {
 export function useGamification(projectId: string): GamificationApi {
   const [persisted, setPersisted] = useState<PersistedState>(() => loadPersisted(projectId))
 
-  useEffect(() => {
+  // Reload persisted state when the active project changes. This is React's
+  // documented "adjust state during render" pattern (a state sentinel, not an
+  // effect) — it avoids the cascading render an effect would cause.
+  const [lastProjectId, setLastProjectId] = useState(projectId)
+  if (lastProjectId !== projectId) {
+    setLastProjectId(projectId)
     setPersisted(loadPersisted(projectId))
-  }, [projectId])
+  }
 
   useEffect(() => {
     savePersisted(projectId, persisted)

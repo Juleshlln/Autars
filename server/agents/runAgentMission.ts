@@ -296,7 +296,7 @@ async function actPhase(
     { role: 'user', content: userPrompt },
   ]
 
-  let aggregateUsage: CompletionUsage = {}
+  const aggregateUsage: CompletionUsage = {}
   const addUsage = (u: CompletionUsage | undefined) => {
     if (!u) return
     aggregateUsage.prompt_tokens =
@@ -357,6 +357,7 @@ async function actPhase(
       )
       throw new Error(
         `llm_call_failed (iter=${iteration}, provider=${cfg.provider}): ${detail}`,
+        { cause: err },
       )
     }
     lastModel = completion.model || lastModel

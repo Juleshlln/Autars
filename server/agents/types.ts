@@ -16,6 +16,10 @@ export type AgentMissionType =
   | 'landing'
   | 'acquisition'
   | 'brand-kit'
+  | 'pricing'
+  | 'business-model'
+  | 'roadmap'
+  | 'content-plan'
 
 export interface AgentRunContext {
   workspaceId: string

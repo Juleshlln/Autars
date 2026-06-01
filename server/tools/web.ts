@@ -94,7 +94,7 @@ function stripTags(html: string): string {
 }
 
 function collapseWhitespace(input: string): string {
-  return input.replace(/[\t ]+/g, ' ').replace(/\s{2,}/g, ' ').trim()
+  return input.replace(/\s+/g, ' ').trim()
 }
 
 function extractBody(html: string): string {

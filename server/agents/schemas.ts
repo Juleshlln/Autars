@@ -30,6 +30,10 @@ export const AgentMissionTypeSchema = z.enum([
   'landing',
   'acquisition',
   'brand-kit',
+  'pricing',
+  'business-model',
+  'roadmap',
+  'content-plan',
 ])
 
 export const RecommendedNextMissionSchema = z.object({

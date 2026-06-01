@@ -1,7 +1,14 @@
 // Hand-written DB types mirroring supabase/migrations/*.sql.
 // Regenerate via `supabase gen types typescript` once a project is linked.
 
-export type AgentDbStatus = 'idle' | 'working' | 'blocked' | 'done'
+// Mirrors the public.agents status CHECK constraint exactly.
+export type AgentDbStatus =
+  | 'idle'
+  | 'thinking'
+  | 'working'
+  | 'waiting_validation'
+  | 'blocked'
+  | 'done'
 export type MissionDbStatus =
   | 'todo'
   | 'in_progress'

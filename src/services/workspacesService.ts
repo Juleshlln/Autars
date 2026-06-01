@@ -43,12 +43,18 @@ interface StarterMission {
   agentName: string
   type: string
 }
+// Each starter mission maps to a dedicated backend mission definition
+// (server/agents/*) so it produces a real, role-specific deliverable —
+// never a generic "clarification". Types MUST match the registry keys.
+// Missions are seeded as `todo` and only debit a credit when launched, so
+// listing more of them costs the user nothing up-front.
 const STARTER_MISSIONS: StarterMission[] = [
+  // --- Stratège ---
   {
     title: "Clarifier l'idée business",
     description: 'Reformuler le problème, la cible et la promesse en une page.',
     agentName: 'Stratège',
-    type: 'clarify',
+    type: 'clarify-business-idea',
   },
   {
     title: 'Définir le client cible',
@@ -63,6 +69,13 @@ const STARTER_MISSIONS: StarterMission[] = [
     type: 'value-prop',
   },
   {
+    title: 'Définir le positionnement',
+    description: 'Catégorie de marché et messages clés (framework April Dunford).',
+    agentName: 'Stratège',
+    type: 'positioning',
+  },
+  // --- Builder ---
+  {
     title: 'Imaginer une première offre monétisable',
     description: 'Livrables, format et prix de départ pour générer du chiffre vite.',
     agentName: 'Builder',
@@ -75,10 +88,36 @@ const STARTER_MISSIONS: StarterMission[] = [
     type: 'landing',
   },
   {
+    title: 'Construire la roadmap MVP',
+    description: 'Périmètre v1, ce qu’on exclut, et 3 jalons de build.',
+    agentName: 'Builder',
+    type: 'roadmap',
+  },
+  // --- Growth ---
+  {
     title: "Définir un plan d'acquisition initial",
-    description: 'Choisir 2 canaux, rédiger les messages, planifier 7 jours.',
+    description: 'Choisir 2 canaux prioritaires, rédiger les messages, fixer les métriques.',
     agentName: 'Growth',
     type: 'acquisition',
+  },
+  {
+    title: 'Créer un plan de contenu 7 jours',
+    description: 'Calendrier éditorial prêt à publier sur une semaine.',
+    agentName: 'Growth',
+    type: 'content-plan',
+  },
+  // --- Finance ---
+  {
+    title: 'Définir le pricing',
+    description: 'Grille tarifaire défendable, ancrage et tests de willingness-to-pay.',
+    agentName: 'Finance',
+    type: 'pricing',
+  },
+  {
+    title: 'Construire le business model',
+    description: 'Sources de revenus, structure de coûts et boucle de croissance.',
+    agentName: 'Finance',
+    type: 'business-model',
   },
 ]
 
