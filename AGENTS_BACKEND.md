@@ -144,9 +144,16 @@ L'utilisateur peut alors, depuis l'UI :
 - L'XP n'est pas qu'un badge visuel : il est persisté et conditionne le niveau
   (et, à terme, le déblocage de missions/skins).
 
-> Note V1 : l'XP **QG** (workspace) est prévu par le schéma (`workspaces.xp`,
-> `workspaces.level`) mais l'attribution automatique côté run reste à câbler —
-> voir PRODUCTION_CHECKLIST « points non terminés ».
+- **XP QG (workspace)** : à la même validation, `handleAgentDecide` appelle
+  aussi la RPC `award_hq_xp(user, workspace, xp)` (migration `011`), qui
+  applique la **même formule** que l'agent sur `workspaces.xp/level` et émet un
+  event `hq_leveled_up` (« QG passe niveau X », visible dans le flux d'activité).
+  Les deux attributions sont idempotentes (verrou `missions.xp_awarded`) et
+  best-effort (un échec ne casse jamais la validation).
+
+> Reste à faire (V1) : brancher l'affichage du niveau QG de l'UI gamifiée sur
+> `workspaces.xp/level` (aujourd'hui le panneau visuel a son propre XP local).
+> Voir PRODUCTION_CHECKLIST « points non terminés ».
 
 ---
 

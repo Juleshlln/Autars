@@ -1143,18 +1143,31 @@ export const handleAgentDecide: Handler = withSafety(async (req, res) => {
       .update({ status: 'completed', completed_at: new Date().toISOString() })
       .eq('id', mission.id)
 
-    // Award XP if not awarded yet.
-    if (!mission.xp_awarded && mission.agent_id) {
-      const { error: xpError } = await sb.rpc('award_mission_xp', {
+    // Award XP once per mission — both the agent and the QG (workspace).
+    // Idempotent via missions.xp_awarded. Each RPC is best-effort: a failure
+    // (e.g. award_hq_xp not yet deployed) must not break validation.
+    if (!mission.xp_awarded) {
+      const xpReward = mission.xp_reward ?? 20
+      let xpApplied = false
+
+      if (mission.agent_id) {
+        const { error: agentXpError } = await sb.rpc('award_mission_xp', {
+          p_user_id: ownerId,
+          p_agent_id: mission.agent_id,
+          p_xp: xpReward,
+        })
+        if (!agentXpError) xpApplied = true
+      }
+
+      const { error: hqXpError } = await sb.rpc('award_hq_xp', {
         p_user_id: ownerId,
-        p_agent_id: mission.agent_id,
-        p_xp: mission.xp_reward ?? 20,
+        p_workspace_id: deliverable.workspace_id,
+        p_xp: xpReward,
       })
-      if (!xpError) {
-        await sb
-          .from('missions')
-          .update({ xp_awarded: true })
-          .eq('id', mission.id)
+      if (!hqXpError) xpApplied = true
+
+      if (xpApplied) {
+        await sb.from('missions').update({ xp_awarded: true }).eq('id', mission.id)
       }
     }
 

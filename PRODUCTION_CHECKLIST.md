@@ -33,10 +33,11 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
 
 ## 2. Migrations Supabase
 
-- [x] `supabase/migrations/001…010` présentes et **ordonnées**.
+- [x] `supabase/migrations/001…011` présentes et **ordonnées**.
 - [x] `010_hq_runtime.sql` recapturé (était appliqué en prod mais absent du repo).
+- [x] `011_hq_xp.sql` ajouté (RPC `award_hq_xp` — XP du QG, à appliquer en prod).
 - [x] Toutes les RPC utilisées par le backend existent dans les migrations :
-      `consume_credits`, `refund_credits`, `award_mission_xp`,
+      `consume_credits`, `refund_credits`, `award_mission_xp`, `award_hq_xp`,
       `create_mission_from_recommendation`, `match_memories`,
       `grant_initial_credits`, `handle_new_user`, `handle_new_workspace`.
 - [ ] **Fresh deploy** : sur une base neuve, `supabase db push` applique
@@ -93,8 +94,11 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
 
 ## 6. Points non terminés (V1)
 
-- [ ] **XP QG** : `workspaces.xp/level` existent mais l'attribution automatique
-      à la validation reste à câbler (l'XP **agent** fonctionne).
+- [x] **XP QG** : attribué via `award_hq_xp` à la validation (migration `011`),
+      persisté dans `workspaces.xp/level`, event `hq_leveled_up` dans le flux.
+  - [ ] Reste : appliquer la migration `011` en prod + brancher l'affichage du
+        niveau QG (panneau gamifié) sur `workspaces.xp/level` plutôt que sur
+        l'XP local de `src/v1/gamification`.
 - [ ] **Déploiement `/api/agents/*`** hors middleware Vite (cf. §1).
 - [ ] **Régulariser l'historique migrations** (`supabase migration repair`).
 - [ ] **Tests manuels A/B/C** à dérouler avec clé LLM réelle.
