@@ -67,6 +67,8 @@ import {
   AgentsGamificationGrid,
   BusinessBadges,
   BusinessScoreCard,
+  computeBadges,
+  computeDimensionScores,
   HQProgressHeader,
   MissionsRoadmap,
   NextBestMission,
@@ -1060,6 +1062,16 @@ function DashboardPage({
     const deliverable = latestDeliverableByMission.get(missionId)
     if (deliverable) void onValidateDeliverable(deliverable.id)
   }
+  // Business score + badges derived from REAL validated missions (no longer
+  // localStorage-only). Skins/agent-grid stay cosmetic ("coming soon").
+  const realDimensionScores = useMemo(
+    () => computeDimensionScores(gamRoadmapMissions),
+    [gamRoadmapMissions],
+  )
+  const realBadges = useMemo(
+    () => computeBadges(gamRoadmapMissions, gamification.badges),
+    [gamRoadmapMissions, gamification.badges],
+  )
 
   const qgStats = useMemo(() => {
     const working = liveAgents.filter((agent) => agent.status === 'travaille').length
@@ -1446,9 +1458,7 @@ function DashboardPage({
         </div>
 
         <aside className="dashboard-side-column">
-          <ComingSoon>
-            <BusinessScoreCard scores={gamification.dimensionScores} />
-          </ComingSoon>
+          <BusinessScoreCard scores={realDimensionScores} />
           <DashboardSection title="Actions rapides" subtitle="Lancez une mission simple.">
             <div className="quick-action-list">
               {quickActions.map((action) => (
@@ -1463,9 +1473,7 @@ function DashboardPage({
             <ActivityFeedSection events={activity} />
           )}
           <InfrastructureSection />
-          <ComingSoon>
-            <BusinessBadges badges={gamification.badges} />
-          </ComingSoon>
+          <BusinessBadges badges={realBadges} />
           <DashboardSection title="Décisions à valider" subtitle="Contrôle fondateur.">
             <div className="decision-list">
               <div>

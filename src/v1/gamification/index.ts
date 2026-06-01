@@ -1,6 +1,6 @@
 export * from './types'
 export { useGamification } from './state'
-export { toGamAgents, toGamMissions, pickNextBestMission } from './adapter'
+export { toGamAgents, toGamMissions, pickNextBestMission, computeDimensionScores, computeBadges } from './adapter'
 export {
   HQProgressHeader,
   BusinessScoreCard,

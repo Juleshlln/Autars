@@ -120,10 +120,9 @@ Voir `.env.example` (complet et commenté). Découpage **public vs secret** :
   multi-itérations (`maxToolIterations` plafonné). Les autres missions sont en
   génération déterministe sans outil (fiables).
 - **Couplage front ↔ middleware Vite** pour les appels IA (cf. §1).
-- **Fusion missions faite** : le roadmap gamifié + la carte « Mission
-  recommandée » sont alimentés par les **vraies** missions backend (via
-  `src/v1/gamification/adapter.ts`) et déclenchent les vraies actions (lancer /
-  valider). La liste détaillée « Missions en cours » est conservée (vue détail).
-  Restent **cosmétiques** (localStorage) mais affichés et marqués « Bientôt
-  disponible » : badges, skins, business score, grille d'agents gamifiée — à
-  brancher sur le réel dans une itération ultérieure.
+- **Fusion gamification faite** : le roadmap + la carte « Mission recommandée »,
+  le **business score** et les **badges** sont désormais dérivés des **vraies**
+  missions/livrables backend (via `src/v1/gamification/adapter.ts`) ; le roadmap
+  déclenche les vraies actions (lancer / valider). La liste « Missions en cours »
+  est conservée (vue détail). Restent **cosmétiques** (localStorage), affichés
+  mais marqués « Bientôt disponible » : skins + grille d'agents gamifiée.

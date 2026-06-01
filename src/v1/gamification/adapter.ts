@@ -11,6 +11,9 @@ import type { Agent, Mission } from '../../lib/types'
 import type { DeliverableRow } from '../../services/deliverablesService'
 import type {
   AgentIconKey,
+  Badge,
+  BadgeCategory,
+  DimensionScore,
   GamAgent,
   GamAgentStatus,
   GamMission,
@@ -138,4 +141,70 @@ export function toGamMissions(
  *  this card only recommends a launchable mission.) */
 export function pickNextBestMission(gamMissions: GamMission[]): GamMission | null {
   return gamMissions.find((m) => m.status === 'available') ?? null
+}
+
+// ---------------------------------------------------------------------
+// Business score + badges, derived from REAL mission completion
+// ---------------------------------------------------------------------
+const DIM_LABEL: Record<ScoreDimension, string> = {
+  clarity: 'Clarté',
+  offer: 'Offre',
+  acquisition: 'Acquisition',
+  execution: 'Exécution',
+  traction: 'Traction',
+}
+
+/** Each dimension = % of its missions validated. `execution` = overall ratio. */
+export function computeDimensionScores(gamMissions: GamMission[]): DimensionScore[] {
+  const dims: ScoreDimension[] = ['clarity', 'offer', 'acquisition', 'execution', 'traction']
+  const total = gamMissions.length
+  const validatedTotal = gamMissions.filter((m) => m.status === 'validated').length
+  return dims.map((dim) => {
+    if (dim === 'execution') {
+      return {
+        dimension: dim,
+        label: DIM_LABEL[dim],
+        value: total === 0 ? 0 : Math.round((validatedTotal / total) * 100),
+        target: 100,
+      }
+    }
+    const inDim = gamMissions.filter((m) => m.dimension === dim)
+    const validated = inDim.filter((m) => m.status === 'validated').length
+    return {
+      dimension: dim,
+      label: DIM_LABEL[dim],
+      value: inDim.length === 0 ? 0 : Math.round((validated / inDim.length) * 100),
+      target: 100,
+    }
+  })
+}
+
+const CATEGORY_DIMENSION: Record<BadgeCategory, ScoreDimension> = {
+  strategy: 'clarity',
+  offer: 'offer',
+  acquisition: 'acquisition',
+  sales: 'acquisition',
+  revenue: 'execution',
+}
+
+/**
+ * Unlock badges from real progress: within each dimension, the first N badges
+ * unlock where N = number of validated missions in that dimension (seed order).
+ * Honest signal — a badge means "you validated a mission in this area".
+ */
+export function computeBadges(gamMissions: GamMission[], seed: Badge[]): Badge[] {
+  const validatedByDim = new Map<ScoreDimension, number>()
+  for (const m of gamMissions) {
+    if (m.status === 'validated') {
+      validatedByDim.set(m.dimension, (validatedByDim.get(m.dimension) ?? 0) + 1)
+    }
+  }
+  const usedByDim = new Map<ScoreDimension, number>()
+  return seed.map((badge) => {
+    const dim = CATEGORY_DIMENSION[badge.category]
+    const used = usedByDim.get(dim) ?? 0
+    const unlocked = used < (validatedByDim.get(dim) ?? 0)
+    usedByDim.set(dim, used + 1)
+    return { ...badge, unlocked }
+  })
 }
